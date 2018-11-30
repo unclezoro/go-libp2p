@@ -8,6 +8,7 @@ import (
 	crypto "github.com/libp2p/go-libp2p-crypto"
 	pstoremem "github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	secio "github.com/libp2p/go-libp2p-secio"
+	tls "github.com/libp2p/go-libp2p-tls"
 	tcp "github.com/libp2p/go-tcp-transport"
 	ws "github.com/libp2p/go-ws-transport"
 	multiaddr "github.com/multiformats/go-multiaddr"
@@ -19,7 +20,10 @@ import (
 //
 // Useful when you want to extend, but not replace, the supported transport
 // security protocols.
-var DefaultSecurity = Security(secio.ID, secio.New)
+var DefaultSecurity = ChainOptions(
+	Security(tls.ID, tls.New),
+	Security(secio.ID, secio.New),
+)
 
 // DefaultMuxers configures libp2p to use the stream connection multiplexers.
 //

@@ -10,6 +10,7 @@ import (
 	crypto "github.com/libp2p/go-libp2p-crypto"
 	host "github.com/libp2p/go-libp2p-host"
 	pstore "github.com/libp2p/go-libp2p-peerstore"
+	secio "github.com/libp2p/go-libp2p-secio"
 	"github.com/libp2p/go-tcp-transport"
 )
 
@@ -45,6 +46,29 @@ func TestNoListenAddrs(t *testing.T) {
 	}
 }
 
+func TestConnect(t *testing.T) {
+	ctx := context.Background()
+	a, err := New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := New(ctx, ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	err = a.Connect(ctx, pstore.PeerInfo{
+		ID:    b.ID(),
+		Addrs: b.Addrs(),
+	})
+	if err != nil {
+		t.Error("connect should have succeeded")
+	}
+}
+
 func TestNoTransports(t *testing.T) {
 	ctx := context.Background()
 	a, err := New(ctx, NoTransports)
@@ -65,6 +89,36 @@ func TestNoTransports(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("dial should have failed as no transports have been configured")
+	}
+}
+
+func TestSecioFallback(t *testing.T) {
+	ctx := context.Background()
+	opts := ChainOptions(
+		RandomIdentity,
+		DefaultMuxers,
+		DefaultPeerstore,
+		DefaultTransports,
+		Security(secio.ID, secio.New),
+	)
+	a, err := NewWithoutDefaults(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := New(ctx, ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	err = a.Connect(ctx, pstore.PeerInfo{
+		ID:    b.ID(),
+		Addrs: b.Addrs(),
+	})
+	if err != nil {
+		t.Errorf("connect should have succeeded, got error: %s", err)
 	}
 }
 
