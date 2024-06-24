@@ -1,43 +1,53 @@
 // Package mocknet provides a mock net.Network to test with.
 //
-// - a Mocknet has many inet.Networks
+// - a Mocknet has many network.Networks
 // - a Mocknet has many Links
-// - a Link joins two inet.Networks
-// - inet.Conns and inet.Streams are created by inet.Networks
+// - a Link joins two network.Networks
+// - network.Conns and network.Streams are created by network.Networks
 package mocknet
 
 import (
 	"io"
 	"time"
 
-	host "github.com/libp2p/go-libp2p-host"
+	"github.com/libp2p/go-libp2p/core/connmgr"
+	ic "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 
-	ic "github.com/libp2p/go-libp2p-crypto"
-	inet "github.com/libp2p/go-libp2p-net"
-	peer "github.com/libp2p/go-libp2p-peer"
-	pstore "github.com/libp2p/go-libp2p-peerstore"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-type Mocknet interface {
+type PeerOptions struct {
+	// ps is the Peerstore to use when adding peer. If nil, a default peerstore will be created.
+	ps peerstore.Peerstore
 
-	// GenPeer generates a peer and its inet.Network in the Mocknet
+	// gater is the ConnectionGater to use when adding a peer. If nil, no connection gater will be used.
+	gater connmgr.ConnectionGater
+}
+
+type Mocknet interface {
+	// GenPeer generates a peer and its network.Network in the Mocknet
 	GenPeer() (host.Host, error)
+	GenPeerWithOptions(PeerOptions) (host.Host, error)
 
 	// AddPeer adds an existing peer. we need both a privkey and addr.
 	// ID is derived from PrivKey
 	AddPeer(ic.PrivKey, ma.Multiaddr) (host.Host, error)
-	AddPeerWithPeerstore(peer.ID, pstore.Peerstore) (host.Host, error)
+	AddPeerWithPeerstore(peer.ID, peerstore.Peerstore) (host.Host, error)
+	AddPeerWithOptions(peer.ID, PeerOptions) (host.Host, error)
 
 	// retrieve things (with randomized iteration order)
 	Peers() []peer.ID
-	Net(peer.ID) inet.Network
-	Nets() []inet.Network
+	Net(peer.ID) network.Network
+	Nets() []network.Network
 	Host(peer.ID) host.Host
 	Hosts() []host.Host
 	Links() LinkMap
 	LinksBetweenPeers(a, b peer.ID) []Link
-	LinksBetweenNets(a, b inet.Network) []Link
+	LinksBetweenNets(a, b network.Network) []Link
 
 	// Links are the **ability to connect**.
 	// think of Links as the physical medium.
@@ -45,24 +55,26 @@ type Mocknet interface {
 	// (this makes it possible to test dial failures, and
 	// things like relaying traffic)
 	LinkPeers(peer.ID, peer.ID) (Link, error)
-	LinkNets(inet.Network, inet.Network) (Link, error)
+	LinkNets(network.Network, network.Network) (Link, error)
 	Unlink(Link) error
 	UnlinkPeers(peer.ID, peer.ID) error
-	UnlinkNets(inet.Network, inet.Network) error
+	UnlinkNets(network.Network, network.Network) error
 
 	// LinkDefaults are the default options that govern links
-	// if they do not have thier own option set.
+	// if they do not have their own option set.
 	SetLinkDefaults(LinkOptions)
 	LinkDefaults() LinkOptions
 
 	// Connections are the usual. Connecting means Dialing.
 	// **to succeed, peers must be linked beforehand**
-	ConnectPeers(peer.ID, peer.ID) (inet.Conn, error)
-	ConnectNets(inet.Network, inet.Network) (inet.Conn, error)
+	ConnectPeers(peer.ID, peer.ID) (network.Conn, error)
+	ConnectNets(network.Network, network.Network) (network.Conn, error)
 	DisconnectPeers(peer.ID, peer.ID) error
-	DisconnectNets(inet.Network, inet.Network) error
+	DisconnectNets(network.Network, network.Network) error
 	LinkAll() error
 	ConnectAllButSelf() error
+
+	io.Closer
 }
 
 // LinkOptions are used to change aspects of the links.
@@ -79,7 +91,7 @@ type LinkOptions struct {
 // connect. This allows constructing topologies where specific
 // nodes cannot talk to each other directly. :)
 type Link interface {
-	Networks() []inet.Network
+	Networks() []network.Network
 	Peers() []peer.ID
 
 	SetOptions(LinkOptions)
@@ -96,7 +108,7 @@ type LinkMap map[string]map[string]map[Link]struct{}
 type Printer interface {
 	// MocknetLinks shows the entire Mocknet's link table :)
 	MocknetLinks(mn Mocknet)
-	NetworkConns(ni inet.Network)
+	NetworkConns(ni network.Network)
 }
 
 // PrinterTo returns a Printer ready to write to w.

@@ -2,31 +2,36 @@ package mocknet
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
-	inet "github.com/libp2p/go-libp2p-net"
-	peer "github.com/libp2p/go-libp2p-peer"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	ma "github.com/multiformats/go-multiaddr"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNotifications(t *testing.T) {
 	const swarmSize = 5
+	const timeout = 10 * time.Second
 
-	mn, err := FullMeshLinked(context.Background(), swarmSize)
+	mn, err := FullMeshLinked(swarmSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	timeout := 10 * time.Second
+	defer mn.Close()
 
 	// signup notifs
 	nets := mn.Nets()
-	notifiees := make([]*netNotifiee, len(nets))
-	for i, pn := range nets {
-		n := newNetNotifiee(swarmSize)
+	notifiees := make(map[peer.ID]*netNotifiee, len(nets))
+	for _, pn := range nets {
+		defer pn.Close()
+
+		n := newNetNotifiee(t, swarmSize)
 		pn.Notify(n)
-		notifiees[i] = n
+		notifiees[pn.LocalPeer()] = n
 	}
 
 	// connect all but self
@@ -35,16 +40,16 @@ func TestNotifications(t *testing.T) {
 	}
 
 	// test everyone got the correct connection opened calls
-	for i, s := range nets {
-		n := notifiees[i]
-		notifs := make(map[peer.ID][]inet.Conn)
-		for j, s2 := range nets {
-			if i == j {
+	for _, s1 := range nets {
+		n := notifiees[s1.LocalPeer()]
+		notifs := make(map[peer.ID][]network.Conn)
+		for _, s2 := range nets {
+			if s2 == s1 {
 				continue
 			}
 
 			// this feels a little sketchy, but its probably okay
-			for len(s.ConnsToPeer(s2.LocalPeer())) != len(notifs[s2.LocalPeer()]) {
+			for len(s1.ConnsToPeer(s2.LocalPeer())) != len(notifs[s2.LocalPeer()]) {
 				select {
 				case c := <-n.connected:
 					nfp := notifs[c.RemotePeer()]
@@ -56,7 +61,7 @@ func TestNotifications(t *testing.T) {
 		}
 
 		for p, cons := range notifs {
-			expect := s.ConnsToPeer(p)
+			expect := s1.ConnsToPeer(p)
 			if len(expect) != len(cons) {
 				t.Fatal("got different number of connections")
 			}
@@ -77,100 +82,45 @@ func TestNotifications(t *testing.T) {
 		}
 	}
 
-	complement := func(c inet.Conn) (inet.Network, *netNotifiee, *conn) {
-		for i, s := range nets {
-			for _, c2 := range s.Conns() {
-				if c2.(*conn).rconn == c {
-					return s, notifiees[i], c2.(*conn)
-				}
-			}
-		}
-		t.Fatal("complementary conn not found", c)
-		return nil, nil, nil
-	}
-
-	testOCStream := func(n *netNotifiee, s inet.Stream) {
-		var s2 inet.Stream
-		select {
-		case s2 = <-n.openedStream:
-			t.Log("got notif for opened stream")
-		case <-time.After(timeout):
-			t.Fatal("timeout")
-		}
-		if s != nil && s != s2 {
-			t.Fatalf("got incorrect stream %p %p", s, s2)
-		}
-
-		select {
-		case s2 = <-n.closedStream:
-			t.Log("got notif for closed stream")
-		case <-time.After(timeout):
-			t.Fatal("timeout")
-		}
-		if s != nil && s != s2 {
-			t.Fatalf("got incorrect stream %p %p", s, s2)
-		}
-	}
-
+	acceptedStream := make(chan struct{}, 1000)
 	for _, s := range nets {
-		s.SetStreamHandler(func(s inet.Stream) {
-			inet.FullClose(s)
+		s.SetStreamHandler(func(s network.Stream) {
+			acceptedStream <- struct{}{}
+			s.Close()
 		})
 	}
 
-	// there's one stream per conn that we need to drain....
-	// unsure where these are coming from
-	for i := range nets {
-		n := notifiees[i]
-		for j := 0; j < len(nets)-1; j++ {
-			testOCStream(n, nil)
-		}
-	}
-
-	streams := make(chan inet.Stream)
+	// Make sure we've received at last one stream per conn.
 	for _, s := range nets {
-		s.SetStreamHandler(func(s inet.Stream) {
-			streams <- s
-			inet.FullClose(s)
-		})
-	}
-
-	// open a streams in each conn
-	for i, s := range nets {
 		conns := s.Conns()
 		for _, c := range conns {
-			_, n2, c2 := complement(c)
-			st1, err := c.NewStream()
+			st1, err := c.NewStream(context.Background())
 			if err != nil {
 				t.Error(err)
-			} else {
-				t.Logf("%s %s <--%p--> %s %s", c.LocalPeer(), c.LocalMultiaddr(), st1, c.RemotePeer(), c.RemoteMultiaddr())
-				// st1.Write([]byte("hello"))
-				go inet.FullClose(st1)
-				st2 := <-streams
-				t.Logf("%s %s <--%p--> %s %s", c2.LocalPeer(), c2.LocalMultiaddr(), st2, c2.RemotePeer(), c2.RemoteMultiaddr())
-				testOCStream(notifiees[i], st1)
-				testOCStream(n2, st2)
+				continue
 			}
+			t.Logf("%s %s <--%p--> %s %s", c.LocalPeer(), c.LocalMultiaddr(), st1, c.RemotePeer(), c.RemoteMultiaddr())
+			st1.Close()
 		}
 	}
 
 	// close conns
-	for i, s := range nets {
-		n := notifiees[i]
-		for _, c := range s.Conns() {
-			_, n2, c2 := complement(c)
-			c.(*conn).Close()
-			c2.Close()
+	for _, s1 := range nets {
+		n1 := notifiees[s1.LocalPeer()]
+		for _, c1 := range s1.Conns() {
+			c2 := ConnComplement(c1)
 
-			var c3, c4 inet.Conn
+			n2 := notifiees[c2.LocalPeer()]
+			c1.Close()
+
+			var c3, c4 network.Conn
 			select {
-			case c3 = <-n.disconnected:
+			case c3 = <-n1.disconnected:
 			case <-time.After(timeout):
 				t.Fatal("timeout")
 			}
-			if c != c3 {
-				t.Fatal("got incorrect conn", c, c3)
+			if c1 != c3 {
+				t.Fatal("got incorrect conn", c1, c3)
 			}
 
 			select {
@@ -179,47 +129,77 @@ func TestNotifications(t *testing.T) {
 				t.Fatal("timeout")
 			}
 			if c2 != c4 {
-				t.Fatal("got incorrect conn", c, c2)
+				t.Fatal("got incorrect conn", c1, c2)
 			}
+		}
+	}
+
+	for _, n1 := range notifiees {
+		// Avoid holding this lock while waiting, otherwise we can deadlock.
+		streamStateCopy := map[network.Stream]chan struct{}{}
+		n1.streamState.Lock()
+		for str, ch := range n1.streamState.m {
+			streamStateCopy[str] = ch
+		}
+		n1.streamState.Unlock()
+
+		for str1, ch1 := range streamStateCopy {
+			<-ch1
+			str2 := StreamComplement(str1)
+			n2 := notifiees[str1.Conn().RemotePeer()]
+
+			// make sure the OpenedStream notification was processed first
+			var ch2 chan struct{}
+			require.Eventually(t, func() bool {
+				n2.streamState.Lock()
+				defer n2.streamState.Unlock()
+				ch, ok := n2.streamState.m[str2]
+				if ok {
+					ch2 = ch
+				}
+				return ok
+			}, time.Second, 10*time.Millisecond)
+
+			<-ch2
 		}
 	}
 }
 
 type netNotifiee struct {
+	t *testing.T
+
 	listen       chan ma.Multiaddr
 	listenClose  chan ma.Multiaddr
-	connected    chan inet.Conn
-	disconnected chan inet.Conn
-	openedStream chan inet.Stream
-	closedStream chan inet.Stream
-}
+	connected    chan network.Conn
+	disconnected chan network.Conn
 
-func newNetNotifiee(buffer int) *netNotifiee {
-	return &netNotifiee{
-		listen:       make(chan ma.Multiaddr, buffer),
-		listenClose:  make(chan ma.Multiaddr, buffer),
-		connected:    make(chan inet.Conn, buffer),
-		disconnected: make(chan inet.Conn, buffer),
-		openedStream: make(chan inet.Stream, buffer),
-		closedStream: make(chan inet.Stream, buffer),
+	streamState struct {
+		sync.Mutex
+		m map[network.Stream]chan struct{}
 	}
 }
 
-func (nn *netNotifiee) Listen(n inet.Network, a ma.Multiaddr) {
+func newNetNotifiee(t *testing.T, buffer int) *netNotifiee {
+	nn := &netNotifiee{
+		t:            t,
+		listen:       make(chan ma.Multiaddr, 1),
+		listenClose:  make(chan ma.Multiaddr, 1),
+		connected:    make(chan network.Conn, buffer*2),
+		disconnected: make(chan network.Conn, buffer*2),
+	}
+	nn.streamState.m = make(map[network.Stream]chan struct{})
+	return nn
+}
+
+func (nn *netNotifiee) Listen(n network.Network, a ma.Multiaddr) {
 	nn.listen <- a
 }
-func (nn *netNotifiee) ListenClose(n inet.Network, a ma.Multiaddr) {
+func (nn *netNotifiee) ListenClose(n network.Network, a ma.Multiaddr) {
 	nn.listenClose <- a
 }
-func (nn *netNotifiee) Connected(n inet.Network, v inet.Conn) {
+func (nn *netNotifiee) Connected(n network.Network, v network.Conn) {
 	nn.connected <- v
 }
-func (nn *netNotifiee) Disconnected(n inet.Network, v inet.Conn) {
+func (nn *netNotifiee) Disconnected(n network.Network, v network.Conn) {
 	nn.disconnected <- v
-}
-func (nn *netNotifiee) OpenedStream(n inet.Network, v inet.Stream) {
-	nn.openedStream <- v
-}
-func (nn *netNotifiee) ClosedStream(n inet.Network, v inet.Stream) {
-	nn.closedStream <- v
 }

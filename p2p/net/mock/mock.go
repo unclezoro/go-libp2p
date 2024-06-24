@@ -1,16 +1,14 @@
 package mocknet
 
 import (
-	"context"
-
-	logging "github.com/ipfs/go-log"
+	logging "github.com/ipfs/go-log/v2"
 )
 
 var log = logging.Logger("mocknet")
 
 // WithNPeers constructs a Mocknet with N peers.
-func WithNPeers(ctx context.Context, n int) (Mocknet, error) {
-	m := New(ctx)
+func WithNPeers(n int) (Mocknet, error) {
+	m := New()
 	for i := 0; i < n; i++ {
 		if _, err := m.GenPeer(); err != nil {
 			return nil, err
@@ -22,8 +20,8 @@ func WithNPeers(ctx context.Context, n int) (Mocknet, error) {
 // FullMeshLinked constructs a Mocknet with full mesh of Links.
 // This means that all the peers **can** connect to each other
 // (not that they already are connected. you can use m.ConnectAll())
-func FullMeshLinked(ctx context.Context, n int) (Mocknet, error) {
-	m, err := WithNPeers(ctx, n)
+func FullMeshLinked(n int) (Mocknet, error) {
+	m, err := WithNPeers(n)
 	if err != nil {
 		return nil, err
 	}
@@ -31,21 +29,19 @@ func FullMeshLinked(ctx context.Context, n int) (Mocknet, error) {
 	if err := m.LinkAll(); err != nil {
 		return nil, err
 	}
-
 	return m, nil
 }
 
 // FullMeshConnected constructs a Mocknet with full mesh of Connections.
 // This means that all the peers have dialed and are ready to talk to
 // each other.
-func FullMeshConnected(ctx context.Context, n int) (Mocknet, error) {
-	m, err := FullMeshLinked(ctx, n)
+func FullMeshConnected(n int) (Mocknet, error) {
+	m, err := FullMeshLinked(n)
 	if err != nil {
 		return nil, err
 	}
 
-	err = m.ConnectAllButSelf()
-	if err != nil {
+	if err := m.ConnectAllButSelf(); err != nil {
 		return nil, err
 	}
 	return m, nil

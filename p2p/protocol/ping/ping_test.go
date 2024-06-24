@@ -5,27 +5,32 @@ import (
 	"testing"
 	"time"
 
-	peer "github.com/libp2p/go-libp2p-peer"
-	pstore "github.com/libp2p/go-libp2p-peerstore"
-	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
+	"github.com/libp2p/go-libp2p/core/peer"
 	bhost "github.com/libp2p/go-libp2p/p2p/host/basic"
-	ping "github.com/libp2p/go-libp2p/p2p/protocol/ping"
+	swarmt "github.com/libp2p/go-libp2p/p2p/net/swarm/testing"
+	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
+
+	ma "github.com/multiformats/go-multiaddr"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h1 := bhost.New(swarmt.GenSwarm(t, ctx))
-	h2 := bhost.New(swarmt.GenSwarm(t, ctx))
+	h1, err := bhost.NewHost(swarmt.GenSwarm(t), nil)
+	require.NoError(t, err)
+	defer h1.Close()
+	h1.Start()
+	h2, err := bhost.NewHost(swarmt.GenSwarm(t), nil)
+	require.NoError(t, err)
+	defer h2.Close()
+	h2.Start()
 
-	err := h1.Connect(ctx, pstore.PeerInfo{
+	err = h1.Connect(ctx, peer.AddrInfo{
 		ID:    h2.ID(),
-		Addrs: h2.Addrs(),
+		Addrs: []ma.Multiaddr{h2.Addrs()[0]},
 	})
-
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	ps1 := ping.NewPingService(h1)
 	ps2 := ping.NewPingService(h2)
@@ -37,15 +42,13 @@ func TestPing(t *testing.T) {
 func testPing(t *testing.T, ps *ping.PingService, p peer.ID) {
 	pctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ts, err := ps.Ping(pctx, p)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ts := ps.Ping(pctx, p)
 
 	for i := 0; i < 5; i++ {
 		select {
-		case took := <-ts:
-			t.Log("ping took: ", took)
+		case res := <-ts:
+			require.NoError(t, res.Error)
+			t.Log("ping took: ", res.RTT)
 		case <-time.After(time.Second * 4):
 			t.Fatal("failed to receive ping")
 		}

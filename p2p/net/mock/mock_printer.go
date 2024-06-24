@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"io"
 
-	inet "github.com/libp2p/go-libp2p-net"
-	peer "github.com/libp2p/go-libp2p-peer"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // separate object so our interfaces are separate :)
@@ -26,7 +26,7 @@ func (p *printer) MocknetLinks(mn Mocknet) {
 	fmt.Fprintf(p.w, "\n")
 }
 
-func (p *printer) NetworkConns(ni inet.Network) {
+func (p *printer) NetworkConns(ni network.Network) {
 
 	fmt.Fprintf(p.w, "%s connected to:\n", ni.LocalPeer())
 	for _, c := range ni.Conns() {

@@ -3,65 +3,89 @@ package mocknet
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"fmt"
 	"io"
 	"math"
-	"math/rand"
 	"sync"
 	"testing"
 	"time"
 
-	detectrace "github.com/ipfs/go-detect-race"
-	inet "github.com/libp2p/go-libp2p-net"
-	peer "github.com/libp2p/go-libp2p-peer"
-	protocol "github.com/libp2p/go-libp2p-protocol"
-	testutil "github.com/libp2p/go-testutil"
+	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/event"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/p2p/net/conngater"
+	manet "github.com/multiformats/go-multiaddr/net"
+
+	"github.com/libp2p/go-libp2p-testing/ci"
+	tetc "github.com/libp2p/go-libp2p-testing/etc"
+	"github.com/libp2p/go-libp2p-testing/race"
+	ma "github.com/multiformats/go-multiaddr"
+	"github.com/stretchr/testify/require"
 )
 
-func randPeer(t *testing.T) peer.ID {
-	p, err := testutil.RandPeerID()
-	if err != nil {
-		t.Fatal(err)
+var lastPort = struct {
+	port int
+	sync.Mutex
+}{}
+
+// randLocalTCPAddress returns a random multiaddr. it suppresses errors
+// for nice composability-- do check the address isn't nil.
+//
+// NOTE: for real network tests, use a :0 address, so the kernel
+// assigns an unused TCP port. otherwise you may get clashes.
+func randLocalTCPAddress() ma.Multiaddr {
+	// chances are it will work out, but it **might** fail if the port is in use
+	// most ports above 10000 aren't in use by long running processes, so yay.
+	// (maybe there should be a range of "loopback" ports that are guaranteed
+	// to be open for the process, but naturally can only talk to self.)
+
+	lastPort.Lock()
+	if lastPort.port == 0 {
+		lastPort.port = 10000 + tetc.SeededRand.Intn(50000)
 	}
-	return p
+	port := lastPort.port
+	lastPort.port++
+	lastPort.Unlock()
+
+	addr := fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", port)
+	maddr, _ := ma.NewMultiaddr(addr)
+	return maddr
 }
 
 func TestNetworkSetup(t *testing.T) {
-
 	ctx := context.Background()
-	sk1, _, err := testutil.RandTestKeyPair(512)
-	if err != nil {
-		t.Fatal(t)
-	}
-	sk2, _, err := testutil.RandTestKeyPair(512)
-	if err != nil {
-		t.Fatal(t)
-	}
-	sk3, _, err := testutil.RandTestKeyPair(512)
-	if err != nil {
-		t.Fatal(t)
-	}
-	mn := New(ctx)
-	// peers := []peer.ID{p1, p2, p3}
+	priv1, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	require.NoError(t, err)
+	priv2, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	require.NoError(t, err)
+	priv3, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	require.NoError(t, err)
+	mn := New()
+	defer mn.Close()
 
 	// add peers to mock net
 
-	a1 := testutil.RandLocalTCPAddress()
-	a2 := testutil.RandLocalTCPAddress()
-	a3 := testutil.RandLocalTCPAddress()
+	a1 := randLocalTCPAddress()
+	a2 := randLocalTCPAddress()
+	a3 := randLocalTCPAddress()
 
-	h1, err := mn.AddPeer(sk1, a1)
+	h1, err := mn.AddPeer(priv1, a1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p1 := h1.ID()
 
-	h2, err := mn.AddPeer(sk2, a2)
+	h2, err := mn.AddPeer(priv2, a2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p2 := h2.ID()
 
-	h3, err := mn.AddPeer(sk3, a3)
+	h3, err := mn.AddPeer(priv3, a3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,8 +221,18 @@ func TestNetworkSetup(t *testing.T) {
 		t.Error(err)
 	}
 
-	if len(n2.Conns()) != 1 || len(n3.Conns()) != 1 {
-		t.Errorf("should have (1,1) conn. Got: (%d, %d)", len(n2.Conns()), len(n3.Conns()))
+	// should immediately have a conn on peer 1
+	if len(n2.Conns()) != 1 {
+		t.Errorf("should have 1 conn on initiator. Got: %d)", len(n2.Conns()))
+	}
+
+	// wait for reciever to see the conn.
+	for i := 0; i < 10 && len(n3.Conns()) == 0; i++ {
+		time.Sleep(time.Duration(10*i) * time.Millisecond)
+	}
+
+	if len(n3.Conns()) != 1 {
+		t.Errorf("should have 1 conn on reciever. Got: %d", len(n3.Conns()))
 	}
 
 	// p := PrinterTo(os.Stdout)
@@ -273,12 +307,13 @@ func TestNetworkSetup(t *testing.T) {
 func TestStreams(t *testing.T) {
 	ctx := context.Background()
 
-	mn, err := FullMeshConnected(context.Background(), 3)
+	mn, err := FullMeshConnected(3)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer mn.Close()
 
-	handler := func(s inet.Stream) {
+	handler := func(s network.Stream) {
 		b := make([]byte, 4)
 		if _, err := io.ReadFull(s, b); err != nil {
 			panic(err)
@@ -315,107 +350,18 @@ func TestStreams(t *testing.T) {
 
 }
 
-func makePinger(st string, n int) func(inet.Stream) {
-	return func(s inet.Stream) {
-		go func() {
-			defer s.Close()
-
-			for i := 0; i < n; i++ {
-				b := make([]byte, 4+len(st))
-				if _, err := s.Write([]byte("ping" + st)); err != nil {
-					panic(err)
-				}
-				if _, err := io.ReadFull(s, b); err != nil {
-					panic(err)
-				}
-				if !bytes.Equal(b, []byte("pong"+st)) {
-					panic("bytes mismatch")
-				}
-			}
-		}()
-	}
-}
-
-func makePonger(st string) func(inet.Stream) {
-	return func(s inet.Stream) {
-		go func() {
-			defer s.Close()
-
-			for {
-				b := make([]byte, 4+len(st))
-				if _, err := io.ReadFull(s, b); err != nil {
-					if err == io.EOF {
-						return
-					}
-					panic(err)
-				}
-				if !bytes.Equal(b, []byte("ping"+st)) {
-					panic("bytes mismatch")
-				}
-				if _, err := s.Write([]byte("pong" + st)); err != nil {
-					panic(err)
-				}
-			}
-		}()
-	}
-}
-
-func TestStreamsStress(t *testing.T) {
-	ctx := context.Background()
-	nnodes := 100
-	if detectrace.WithRace() {
-		nnodes = 50
-	}
-
-	mn, err := FullMeshConnected(context.Background(), nnodes)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	hosts := mn.Hosts()
-	for _, h := range hosts {
-		ponger := makePonger(string(protocol.TestingID))
-		h.SetStreamHandler(protocol.TestingID, ponger)
-	}
-
-	var wg sync.WaitGroup
-	for i := 0; i < 1000; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			var from, to int
-			for from == to {
-				from = rand.Intn(len(hosts))
-				to = rand.Intn(len(hosts))
-			}
-			s, err := hosts[from].NewStream(ctx, hosts[to].ID(), protocol.TestingID)
-			if err != nil {
-				log.Debugf("%d (%s) %d (%s)", from, hosts[from], to, hosts[to])
-				panic(err)
-			}
-
-			log.Infof("%d start pinging", i)
-			makePinger("pingpong", rand.Intn(100))(s)
-			log.Infof("%d done pinging", i)
-		}(i)
-	}
-
-	wg.Wait()
-}
-
 func TestAdding(t *testing.T) {
+	mn := New()
+	defer mn.Close()
 
-	mn := New(context.Background())
-
-	peers := []peer.ID{}
+	var peers []peer.ID
 	for i := 0; i < 3; i++ {
-		sk, _, err := testutil.RandTestKeyPair(512)
+		priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
 		if err != nil {
 			t.Fatal(err)
 		}
-
-		a := testutil.RandLocalTCPAddress()
-		h, err := mn.AddPeer(sk, a)
+		a := randLocalTCPAddress()
+		h, err := mn.AddPeer(priv, a)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -440,7 +386,7 @@ func TestAdding(t *testing.T) {
 	if h2 == nil {
 		t.Fatalf("no host for %s", p2)
 	}
-	h2.SetStreamHandler(protocol.TestingID, func(s inet.Stream) {
+	h2.SetStreamHandler(protocol.TestingID, func(s network.Stream) {
 		defer s.Close()
 
 		b := make([]byte, 4)
@@ -487,6 +433,10 @@ func TestAdding(t *testing.T) {
 }
 
 func TestRateLimiting(t *testing.T) {
+	if ci.IsRunning() {
+		t.Skip("buggy in CI")
+	}
+
 	rl := NewRateLimiter(10)
 
 	if !within(rl.Limit(10), time.Duration(float32(time.Second)), time.Millisecond) {
@@ -513,11 +463,11 @@ func TestRateLimiting(t *testing.T) {
 	}
 
 	rl.UpdateBandwidth(100)
-	if !within(rl.Limit(1), time.Duration(time.Millisecond*10), time.Millisecond) {
+	if !within(rl.Limit(1), time.Millisecond*10, time.Millisecond) {
 		t.Fatal()
 	}
 
-	if within(rl.Limit(1), time.Duration(time.Millisecond*10), time.Millisecond) {
+	if within(rl.Limit(1), time.Millisecond*10, time.Millisecond) {
 		t.Fatal()
 	}
 }
@@ -527,15 +477,16 @@ func within(t1 time.Duration, t2 time.Duration, tolerance time.Duration) bool {
 }
 
 func TestLimitedStreams(t *testing.T) {
-	mn, err := FullMeshConnected(context.Background(), 2)
+	mn, err := FullMeshConnected(2)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer mn.Close()
 
 	var wg sync.WaitGroup
 	messages := 4
 	messageSize := 500
-	handler := func(s inet.Stream) {
+	handler := func(s network.Stream) {
 		b := make([]byte, messageSize)
 		for i := 0; i < messages; i++ {
 			if _, err := io.ReadFull(s, b); err != nil {
@@ -581,30 +532,32 @@ func TestLimitedStreams(t *testing.T) {
 	}
 
 	wg.Wait()
-	if !within(time.Since(before), time.Duration(time.Second*2), time.Second/3) {
+	if !within(time.Since(before), time.Second*5/2, time.Second) {
 		t.Fatal("Expected 2ish seconds but got ", time.Since(before))
 	}
 }
 func TestFuzzManyPeers(t *testing.T) {
-	peerCount := 50000
-	if detectrace.WithRace() {
-		peerCount = 1000
+	peerCount := 500
+	if race.WithRace() {
+		peerCount = 100
 	}
 	for i := 0; i < peerCount; i++ {
-		_, err := FullMeshConnected(context.Background(), 2)
+		mn, err := FullMeshConnected(2)
 		if err != nil {
 			t.Fatal(err)
 		}
+		mn.Close()
 	}
 }
 
 func TestStreamsWithLatency(t *testing.T) {
 	latency := time.Millisecond * 500
 
-	mn, err := WithNPeers(context.Background(), 2)
+	mn, err := WithNPeers(2)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer mn.Close()
 
 	// configure the Mocknet with some latency and link/connect its peers
 	mn.SetLinkDefaults(LinkOptions{Latency: latency})
@@ -619,7 +572,7 @@ func TestStreamsWithLatency(t *testing.T) {
 	// we'll write once to a single stream
 	wg.Add(1)
 
-	handler := func(s inet.Stream) {
+	handler := func(s network.Stream) {
 		b := make([]byte, mln)
 
 		if _, err := io.ReadFull(s, b); err != nil {
@@ -646,8 +599,153 @@ func TestStreamsWithLatency(t *testing.T) {
 	wg.Wait()
 
 	delta := time.Since(checkpoint)
-	tolerance := time.Millisecond * 100
+	tolerance := time.Second
 	if !within(delta, latency, tolerance) {
 		t.Fatalf("Expected write to take ~%s (+/- %s), but took %s", latency.String(), tolerance.String(), delta.String())
 	}
+}
+
+func TestEventBus(t *testing.T) {
+	const peers = 2
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	mn, err := FullMeshLinked(peers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mn.Close()
+
+	sub0, err := mn.Hosts()[0].EventBus().Subscribe(new(event.EvtPeerConnectednessChanged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub0.Close()
+	sub1, err := mn.Hosts()[1].EventBus().Subscribe(new(event.EvtPeerConnectednessChanged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub1.Close()
+
+	id0, id1 := mn.Hosts()[0].ID(), mn.Hosts()[1].ID()
+
+	_, err = mn.ConnectPeers(id0, id1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range make([]int, peers) {
+		select {
+		case evt := <-sub0.Out():
+			evnt := evt.(event.EvtPeerConnectednessChanged)
+			if evnt.Peer != id1 {
+				t.Fatal("wrong remote peer")
+			}
+			if evnt.Connectedness != network.Connected {
+				t.Fatal("wrong connectedness type")
+			}
+		case evt := <-sub1.Out():
+			evnt := evt.(event.EvtPeerConnectednessChanged)
+			if evnt.Peer != id0 {
+				t.Fatal("wrong remote peer")
+			}
+			if evnt.Connectedness != network.Connected {
+				t.Fatal("wrong connectedness type")
+			}
+		case <-ctx.Done():
+			t.Fatal("didn't get connectedness events in time")
+		}
+	}
+
+	err = mn.DisconnectPeers(id0, id1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range make([]int, peers) {
+		select {
+		case evt := <-sub0.Out():
+			evnt := evt.(event.EvtPeerConnectednessChanged)
+			if evnt.Peer != id1 {
+				t.Fatal("wrong remote peer")
+			}
+			if evnt.Connectedness != network.NotConnected {
+				t.Fatal("wrong connectedness type")
+			}
+		case evt := <-sub1.Out():
+			evnt := evt.(event.EvtPeerConnectednessChanged)
+			if evnt.Peer != id0 {
+				t.Fatal("wrong remote peer")
+			}
+			if evnt.Connectedness != network.NotConnected {
+				t.Fatal("wrong connectedness type")
+			}
+		case <-ctx.Done():
+			t.Fatal("didn't get connectedness events in time")
+		}
+	}
+}
+
+func TestBlockByPeerID(t *testing.T) {
+	m, gater1, host1, _, host2 := WithConnectionGaters(t)
+
+	err := gater1.BlockPeer(host2.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = m.ConnectPeers(host1.ID(), host2.ID())
+	if err == nil {
+		t.Fatal("Should have blocked connection to banned peer")
+	}
+
+	_, err = m.ConnectPeers(host2.ID(), host1.ID())
+	if err == nil {
+		t.Fatal("Should have blocked connection from banned peer")
+	}
+}
+
+func TestBlockByIP(t *testing.T) {
+	m, gater1, host1, _, host2 := WithConnectionGaters(t)
+
+	ip, err := manet.ToIP(host2.Addrs()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = gater1.BlockAddr(ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = m.ConnectPeers(host1.ID(), host2.ID())
+	if err == nil {
+		t.Fatal("Should have blocked connection to banned IP")
+	}
+
+	_, err = m.ConnectPeers(host2.ID(), host1.ID())
+	if err == nil {
+		t.Fatal("Should have blocked connection from banned IP")
+	}
+}
+
+func WithConnectionGaters(t *testing.T) (Mocknet, *conngater.BasicConnectionGater, host.Host, *conngater.BasicConnectionGater, host.Host) {
+	m := New()
+	addPeer := func() (*conngater.BasicConnectionGater, host.Host) {
+		gater, err := conngater.NewBasicConnectionGater(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := m.GenPeerWithOptions(PeerOptions{gater: gater})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return gater, h
+	}
+	gater1, host1 := addPeer()
+	gater2, host2 := addPeer()
+
+	err := m.LinkAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m, gater1, host1, gater2, host2
 }

@@ -2,22 +2,21 @@ package mocknet
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net"
 	"sort"
 	"sync"
 
-	host "github.com/libp2p/go-libp2p-host"
+	ic "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 	bhost "github.com/libp2p/go-libp2p/p2p/host/basic"
+	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
+	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoremem"
 
-	"github.com/jbenet/goprocess"
-	goprocessctx "github.com/jbenet/goprocess/context"
-	ic "github.com/libp2p/go-libp2p-crypto"
-	inet "github.com/libp2p/go-libp2p-net"
-	p2putil "github.com/libp2p/go-libp2p-netutil"
-	peer "github.com/libp2p/go-libp2p-peer"
-	pstore "github.com/libp2p/go-libp2p-peerstore"
-	pstoremem "github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -28,7 +27,7 @@ var blackholeIP6 = net.ParseIP("100::")
 // mocknet implements mocknet.Mocknet
 type mocknet struct {
 	nets  map[peer.ID]*peernet
-	hosts map[peer.ID]*bhost.BasicHost
+	hosts map[peer.ID]host.Host
 
 	// links make it possible to connect two peers.
 	// think of links as the physical medium.
@@ -38,23 +37,41 @@ type mocknet struct {
 
 	linkDefaults LinkOptions
 
-	proc goprocess.Process // for Context closing
-	ctx  context.Context
+	ctxCancel context.CancelFunc
+	ctx       context.Context
 	sync.Mutex
 }
 
-func New(ctx context.Context) Mocknet {
-	return &mocknet{
+func New() Mocknet {
+	mn := &mocknet{
 		nets:  map[peer.ID]*peernet{},
-		hosts: map[peer.ID]*bhost.BasicHost{},
+		hosts: map[peer.ID]host.Host{},
 		links: map[peer.ID]map[peer.ID]map[*link]struct{}{},
-		proc:  goprocessctx.WithContext(ctx),
-		ctx:   ctx,
 	}
+	mn.ctx, mn.ctxCancel = context.WithCancel(context.Background())
+	return mn
+}
+
+func (mn *mocknet) Close() error {
+	mn.ctxCancel()
+	for _, h := range mn.hosts {
+		h.Close()
+	}
+	for _, n := range mn.nets {
+		n.Close()
+	}
+	return nil
 }
 
 func (mn *mocknet) GenPeer() (host.Host, error) {
-	sk, err := p2putil.RandTestBogusPrivateKey()
+	return mn.GenPeerWithOptions(PeerOptions{})
+}
+
+func (mn *mocknet) GenPeerWithOptions(opts PeerOptions) (host.Host, error) {
+	if err := mn.addDefaults(&opts); err != nil {
+		return nil, err
+	}
+	sk, _, err := ic.GenerateECDSAKeyPair(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +90,20 @@ func (mn *mocknet) GenPeer() (host.Host, error) {
 		return nil, fmt.Errorf("failed to create test multiaddr: %s", err)
 	}
 
-	h, err := mn.AddPeer(sk, a)
+	var ps peerstore.Peerstore
+	if opts.ps == nil {
+		ps, err = pstoremem.NewPeerstore()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		ps = opts.ps
+	}
+	p, err := mn.updatePeerstore(sk, a, ps)
+	if err != nil {
+		return nil, err
+	}
+	h, err := mn.AddPeerWithOptions(p, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -82,41 +112,78 @@ func (mn *mocknet) GenPeer() (host.Host, error) {
 }
 
 func (mn *mocknet) AddPeer(k ic.PrivKey, a ma.Multiaddr) (host.Host, error) {
-	p, err := peer.IDFromPublicKey(k.GetPublic())
+	ps, err := pstoremem.NewPeerstore()
 	if err != nil {
 		return nil, err
 	}
-
-	ps := pstoremem.NewPeerstore()
-	ps.AddAddr(p, a, pstore.PermanentAddrTTL)
-	ps.AddPrivKey(p, k)
-	ps.AddPubKey(p, k.GetPublic())
+	p, err := mn.updatePeerstore(k, a, ps)
+	if err != nil {
+		return nil, err
+	}
 
 	return mn.AddPeerWithPeerstore(p, ps)
 }
 
-func (mn *mocknet) AddPeerWithPeerstore(p peer.ID, ps pstore.Peerstore) (host.Host, error) {
-	n, err := newPeernet(mn.ctx, mn, p, ps)
+func (mn *mocknet) AddPeerWithPeerstore(p peer.ID, ps peerstore.Peerstore) (host.Host, error) {
+	return mn.AddPeerWithOptions(p, PeerOptions{ps: ps})
+}
+
+func (mn *mocknet) AddPeerWithOptions(p peer.ID, opts PeerOptions) (host.Host, error) {
+	bus := eventbus.NewBus()
+	if err := mn.addDefaults(&opts); err != nil {
+		return nil, err
+	}
+	n, err := newPeernet(mn, p, opts, bus)
 	if err != nil {
 		return nil, err
 	}
 
-	opts := &bhost.HostOpts{
-		NegotiationTimeout: -1,
+	hostOpts := &bhost.HostOpts{
+		NegotiationTimeout:      -1,
+		DisableSignedPeerRecord: true,
+		EventBus:                bus,
 	}
 
-	h, err := bhost.NewHost(mn.ctx, n, opts)
+	h, err := bhost.NewHost(n, hostOpts)
 	if err != nil {
 		return nil, err
 	}
-
-	mn.proc.AddChild(n.proc)
+	h.Start()
 
 	mn.Lock()
 	mn.nets[n.peer] = n
 	mn.hosts[n.peer] = h
 	mn.Unlock()
 	return h, nil
+}
+
+func (mn *mocknet) addDefaults(opts *PeerOptions) error {
+	if opts.ps == nil {
+		ps, err := pstoremem.NewPeerstore()
+		if err != nil {
+			return err
+		}
+		opts.ps = ps
+	}
+	return nil
+}
+
+func (mn *mocknet) updatePeerstore(k ic.PrivKey, a ma.Multiaddr, ps peerstore.Peerstore) (peer.ID, error) {
+	p, err := peer.IDFromPublicKey(k.GetPublic())
+	if err != nil {
+		return "", err
+	}
+
+	ps.AddAddr(p, a, peerstore.PermanentAddrTTL)
+	err = ps.AddPrivKey(p, k)
+	if err != nil {
+		return "", err
+	}
+	err = ps.AddPubKey(p, k.GetPublic())
+	if err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
 func (mn *mocknet) Peers() []peer.ID {
@@ -138,7 +205,7 @@ func (mn *mocknet) Host(pid peer.ID) host.Host {
 	return host
 }
 
-func (mn *mocknet) Net(pid peer.ID) inet.Network {
+func (mn *mocknet) Net(pid peer.ID) network.Network {
 	mn.Lock()
 	n := mn.nets[pid]
 	mn.Unlock()
@@ -158,11 +225,11 @@ func (mn *mocknet) Hosts() []host.Host {
 	return cp
 }
 
-func (mn *mocknet) Nets() []inet.Network {
+func (mn *mocknet) Nets() []network.Network {
 	mn.Lock()
 	defer mn.Unlock()
 
-	cp := make([]inet.Network, 0, len(mn.nets))
+	cp := make([]network.Network, 0, len(mn.nets))
 	for _, n := range mn.nets {
 		cp = append(cp, n)
 	}
@@ -220,22 +287,22 @@ func (mn *mocknet) LinkPeers(p1, p2 peer.ID) (Link, error) {
 	return mn.LinkNets(n1, n2)
 }
 
-func (mn *mocknet) validate(n inet.Network) (*peernet, error) {
+func (mn *mocknet) validate(n network.Network) (*peernet, error) {
 	// WARNING: assumes locks acquired
 
 	nr, ok := n.(*peernet)
 	if !ok {
-		return nil, fmt.Errorf("Network not supported (use mock package nets only)")
+		return nil, fmt.Errorf("network not supported (use mock package nets only)")
 	}
 
 	if _, found := mn.nets[nr.peer]; !found {
-		return nil, fmt.Errorf("Network not on mocknet. is it from another mocknet?")
+		return nil, fmt.Errorf("network not on mocknet. is it from another mocknet?")
 	}
 
 	return nr, nil
 }
 
-func (mn *mocknet) LinkNets(n1, n2 inet.Network) (Link, error) {
+func (mn *mocknet) LinkNets(n1, n2 network.Network) (Link, error) {
 	mn.Lock()
 	n1r, err1 := mn.validate(n1)
 	n2r, err2 := mn.validate(n2)
@@ -280,11 +347,11 @@ func (mn *mocknet) UnlinkPeers(p1, p2 peer.ID) error {
 	return nil
 }
 
-func (mn *mocknet) UnlinkNets(n1, n2 inet.Network) error {
+func (mn *mocknet) UnlinkNets(n1, n2 network.Network) error {
 	return mn.UnlinkPeers(n1.LocalPeer(), n2.LocalPeer())
 }
 
-// get from the links map. and lazily contruct.
+// get from the links map. and lazily construct.
 func (mn *mocknet) linksMapGet(p1, p2 peer.ID) map[*link]struct{} {
 
 	l1, found := mn.links[p1]
@@ -337,11 +404,11 @@ func (mn *mocknet) ConnectAllButSelf() error {
 	return nil
 }
 
-func (mn *mocknet) ConnectPeers(a, b peer.ID) (inet.Conn, error) {
+func (mn *mocknet) ConnectPeers(a, b peer.ID) (network.Conn, error) {
 	return mn.Net(a).DialPeer(mn.ctx, b)
 }
 
-func (mn *mocknet) ConnectNets(a, b inet.Network) (inet.Conn, error) {
+func (mn *mocknet) ConnectNets(a, b network.Network) (network.Conn, error) {
 	return a.DialPeer(mn.ctx, b.LocalPeer())
 }
 
@@ -349,7 +416,7 @@ func (mn *mocknet) DisconnectPeers(p1, p2 peer.ID) error {
 	return mn.Net(p1).ClosePeer(p2)
 }
 
-func (mn *mocknet) DisconnectNets(n1, n2 inet.Network) error {
+func (mn *mocknet) DisconnectNets(n1, n2 network.Network) error {
 	return n1.ClosePeer(n2.LocalPeer())
 }
 
@@ -365,7 +432,7 @@ func (mn *mocknet) LinksBetweenPeers(p1, p2 peer.ID) []Link {
 	return cp
 }
 
-func (mn *mocknet) LinksBetweenNets(n1, n2 inet.Network) []Link {
+func (mn *mocknet) LinksBetweenNets(n1, n2 network.Network) []Link {
 	return mn.LinksBetweenPeers(n1.LocalPeer(), n2.LocalPeer())
 }
 
@@ -382,7 +449,7 @@ func (mn *mocknet) LinkDefaults() LinkOptions {
 }
 
 // netSlice for sorting by peer
-type netSlice []inet.Network
+type netSlice []network.Network
 
 func (es netSlice) Len() int           { return len(es) }
 func (es netSlice) Swap(i, j int)      { es[i], es[j] = es[j], es[i] }

@@ -5,18 +5,17 @@ import (
 	"fmt"
 	"time"
 
-	host "github.com/libp2p/go-libp2p-host"
+	"github.com/libp2p/go-libp2p/core/connmgr"
+	"github.com/libp2p/go-libp2p/core/event"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/core/protocol"
 
-	logging "github.com/ipfs/go-log"
-	circuit "github.com/libp2p/go-libp2p-circuit"
-	ifconnmgr "github.com/libp2p/go-libp2p-interface-connmgr"
-	lgbl "github.com/libp2p/go-libp2p-loggables"
-	inet "github.com/libp2p/go-libp2p-net"
-	peer "github.com/libp2p/go-libp2p-peer"
-	pstore "github.com/libp2p/go-libp2p-peerstore"
-	protocol "github.com/libp2p/go-libp2p-protocol"
+	logging "github.com/ipfs/go-log/v2"
+
 	ma "github.com/multiformats/go-multiaddr"
-	msmux "github.com/multiformats/go-multistream"
 )
 
 var log = logging.Logger("routedhost")
@@ -34,7 +33,7 @@ type RoutedHost struct {
 }
 
 type Routing interface {
-	FindPeer(context.Context, peer.ID) (pstore.PeerInfo, error)
+	FindPeer(context.Context, peer.ID) (peer.AddrInfo, error)
 }
 
 func Wrap(h host.Host, r Routing) *RoutedHost {
@@ -46,15 +45,20 @@ func Wrap(h host.Host, r Routing) *RoutedHost {
 //
 // RoutedHost's Connect differs in that if the host has no addresses for a
 // given peer, it will use its routing system to try to find some.
-func (rh *RoutedHost) Connect(ctx context.Context, pi pstore.PeerInfo) error {
-	// first, check if we're already connected.
-	if rh.Network().Connectedness(pi.ID) == inet.Connected {
-		return nil
+func (rh *RoutedHost) Connect(ctx context.Context, pi peer.AddrInfo) error {
+	// first, check if we're already connected unless force direct dial.
+	forceDirect, _ := network.GetForceDirectDial(ctx)
+	canUseLimitedConn, _ := network.GetAllowLimitedConn(ctx)
+	if !forceDirect {
+		connectedness := rh.Network().Connectedness(pi.ID)
+		if connectedness == network.Connected || (canUseLimitedConn && connectedness == network.Limited) {
+			return nil
+		}
 	}
 
 	// if we were given some addresses, keep + use them.
 	if len(pi.Addrs) > 0 {
-		rh.Peerstore().AddAddrs(pi.ID, pi.Addrs, pstore.TempAddrTTL)
+		rh.Peerstore().AddAddrs(pi.ID, pi.Addrs, peerstore.TempAddrTTL)
 	}
 
 	// Check if we have some addresses in our recent memory.
@@ -70,10 +74,9 @@ func (rh *RoutedHost) Connect(ctx context.Context, pi pstore.PeerInfo) error {
 
 	// Issue 448: if our address set includes routed specific relay addrs,
 	// we need to make sure the relay's addr itself is in the peerstore or else
-	// we wont be able to dial it.
+	// we won't be able to dial it.
 	for _, addr := range addrs {
-		_, err := addr.ValueForProtocol(circuit.P_CIRCUIT)
-		if err != nil {
+		if _, err := addr.ValueForProtocol(ma.P_CIRCUIT); err != nil {
 			// not a relay address
 			continue
 		}
@@ -84,8 +87,7 @@ func (rh *RoutedHost) Connect(ctx context.Context, pi pstore.PeerInfo) error {
 		}
 
 		relay, _ := addr.ValueForProtocol(ma.P_P2P)
-
-		relayID, err := peer.IDFromString(relay)
+		relayID, err := peer.Decode(relay)
 		if err != nil {
 			log.Debugf("failed to parse relay ID in address %s: %s", relay, err)
 			continue
@@ -102,12 +104,44 @@ func (rh *RoutedHost) Connect(ctx context.Context, pi pstore.PeerInfo) error {
 			continue
 		}
 
-		rh.Peerstore().AddAddrs(relayID, relayAddrs, pstore.TempAddrTTL)
+		rh.Peerstore().AddAddrs(relayID, relayAddrs, peerstore.TempAddrTTL)
 	}
 
 	// if we're here, we got some addrs. let's use our wrapped host to connect.
 	pi.Addrs = addrs
-	return rh.host.Connect(ctx, pi)
+	if cerr := rh.host.Connect(ctx, pi); cerr != nil {
+		// We couldn't connect. Let's check if we have the most
+		// up-to-date addresses for the given peer. If there
+		// are addresses we didn't know about previously, we
+		// try to connect again.
+		newAddrs, err := rh.findPeerAddrs(ctx, pi.ID)
+		if err != nil {
+			log.Debugf("failed to find more peer addresses %s: %s", pi.ID, err)
+			return cerr
+		}
+
+		// Build lookup map
+		lookup := make(map[string]struct{}, len(addrs))
+		for _, addr := range addrs {
+			lookup[string(addr.Bytes())] = struct{}{}
+		}
+
+		// if there's any address that's not in the previous set
+		// of addresses, try to connect again. If all addresses
+		// where known previously we return the original error.
+		for _, newAddr := range newAddrs {
+			if _, found := lookup[string(newAddr.Bytes())]; found {
+				continue
+			}
+
+			pi.Addrs = newAddrs
+			return rh.host.Connect(ctx, pi)
+		}
+		// No appropriate new address found.
+		// Return the original dial error.
+		return cerr
+	}
+	return nil
 }
 
 func (rh *RoutedHost) findPeerAddrs(ctx context.Context, id peer.ID) ([]ma.Multiaddr, error) {
@@ -118,26 +152,22 @@ func (rh *RoutedHost) findPeerAddrs(ctx context.Context, id peer.ID) ([]ma.Multi
 
 	if pi.ID != id {
 		err = fmt.Errorf("routing failure: provided addrs for different peer")
-		logRoutingErrDifferentPeers(ctx, id, pi.ID, err)
+		log.Errorw("got wrong peer",
+			"error", err,
+			"wantedPeer", id,
+			"gotPeer", pi.ID,
+		)
 		return nil, err
 	}
 
 	return pi.Addrs, nil
 }
 
-func logRoutingErrDifferentPeers(ctx context.Context, wanted, got peer.ID, err error) {
-	lm := make(lgbl.DeferredMap)
-	lm["error"] = err
-	lm["wantedPeer"] = func() interface{} { return wanted.Pretty() }
-	lm["gotPeer"] = func() interface{} { return got.Pretty() }
-	log.Event(ctx, "routingError", lm)
-}
-
 func (rh *RoutedHost) ID() peer.ID {
 	return rh.host.ID()
 }
 
-func (rh *RoutedHost) Peerstore() pstore.Peerstore {
+func (rh *RoutedHost) Peerstore() peerstore.Peerstore {
 	return rh.host.Peerstore()
 }
 
@@ -145,19 +175,23 @@ func (rh *RoutedHost) Addrs() []ma.Multiaddr {
 	return rh.host.Addrs()
 }
 
-func (rh *RoutedHost) Network() inet.Network {
+func (rh *RoutedHost) Network() network.Network {
 	return rh.host.Network()
 }
 
-func (rh *RoutedHost) Mux() *msmux.MultistreamMuxer {
+func (rh *RoutedHost) Mux() protocol.Switch {
 	return rh.host.Mux()
 }
 
-func (rh *RoutedHost) SetStreamHandler(pid protocol.ID, handler inet.StreamHandler) {
+func (rh *RoutedHost) EventBus() event.Bus {
+	return rh.host.EventBus()
+}
+
+func (rh *RoutedHost) SetStreamHandler(pid protocol.ID, handler network.StreamHandler) {
 	rh.host.SetStreamHandler(pid, handler)
 }
 
-func (rh *RoutedHost) SetStreamHandlerMatch(pid protocol.ID, m func(string) bool, handler inet.StreamHandler) {
+func (rh *RoutedHost) SetStreamHandlerMatch(pid protocol.ID, m func(protocol.ID) bool, handler network.StreamHandler) {
 	rh.host.SetStreamHandlerMatch(pid, m, handler)
 }
 
@@ -165,13 +199,16 @@ func (rh *RoutedHost) RemoveStreamHandler(pid protocol.ID) {
 	rh.host.RemoveStreamHandler(pid)
 }
 
-func (rh *RoutedHost) NewStream(ctx context.Context, p peer.ID, pids ...protocol.ID) (inet.Stream, error) {
+func (rh *RoutedHost) NewStream(ctx context.Context, p peer.ID, pids ...protocol.ID) (network.Stream, error) {
 	// Ensure we have a connection, with peer addresses resolved by the routing system (#207)
 	// It is not sufficient to let the underlying host connect, it will most likely not have
 	// any addresses for the peer without any prior connections.
-	err := rh.Connect(ctx, pstore.PeerInfo{ID: p})
-	if err != nil {
-		return nil, err
+	// If the caller wants to prevent the host from dialing, it should use the NoDial option.
+	if nodial, _ := network.GetNoDial(ctx); !nodial {
+		err := rh.Connect(ctx, peer.AddrInfo{ID: p})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return rh.host.NewStream(ctx, p, pids...)
@@ -180,7 +217,7 @@ func (rh *RoutedHost) Close() error {
 	// no need to close IpfsRouting. we dont own it.
 	return rh.host.Close()
 }
-func (rh *RoutedHost) ConnManager() ifconnmgr.ConnManager {
+func (rh *RoutedHost) ConnManager() connmgr.ConnManager {
 	return rh.host.ConnManager()
 }
 
