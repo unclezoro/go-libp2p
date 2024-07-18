@@ -732,8 +732,10 @@ func (h *BasicHost) NewStream(ctx context.Context, p peer.ID, pids ...protocol.I
 		return nil, fmt.Errorf("failed to negotiate protocol: %w", ctx.Err())
 	}
 
-	s.SetProtocol(selected)
-	h.Peerstore().AddProtocols(p, selected)
+	if err := s.SetProtocol(selected); err != nil {
+		return nil, err
+	}
+	_ = h.Peerstore().AddProtocols(p, selected) // adding the protocol to the peerstore isn't critical
 	return s, nil
 }
 
