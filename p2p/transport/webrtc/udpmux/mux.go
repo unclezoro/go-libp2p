@@ -1,3 +1,5 @@
+// The udpmux package contains the logic for multiplexing multiple WebRTC (ICE)
+// connections over a single UDP socket.
 package udpmux
 
 import (

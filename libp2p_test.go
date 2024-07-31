@@ -92,6 +92,7 @@ func TestInsecure(t *testing.T) {
 func TestDefaultListenAddrs(t *testing.T) {
 	reTCP := regexp.MustCompile("/(ip)[4|6]/((0.0.0.0)|(::))/tcp/")
 	reQUIC := regexp.MustCompile("/(ip)[4|6]/((0.0.0.0)|(::))/udp/([0-9]*)/quic-v1")
+	reWebRTC := regexp.MustCompile("/(ip)[4|6]/((0.0.0.0)|(::))/udp/([0-9]*)/webrtc-direct/certhash/(.*)")
 	reCircuit := regexp.MustCompile("/p2p-circuit")
 
 	// Test 1: Setting the correct listen addresses if userDefined.Transport == nil && userDefined.ListenAddrs == nil
@@ -100,6 +101,7 @@ func TestDefaultListenAddrs(t *testing.T) {
 	for _, addr := range h.Network().ListenAddresses() {
 		if reTCP.FindStringSubmatchIndex(addr.String()) == nil &&
 			reQUIC.FindStringSubmatchIndex(addr.String()) == nil &&
+			reWebRTC.FindStringSubmatchIndex(addr.String()) == nil &&
 			reCircuit.FindStringSubmatchIndex(addr.String()) == nil {
 			t.Error("expected ip4 or ip6 or relay interface")
 		}
