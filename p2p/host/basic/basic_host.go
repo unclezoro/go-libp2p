@@ -284,6 +284,20 @@ func NewHost(n network.Network, opts *HostOpts) (*BasicHost, error) {
 	if opts.AddrsFactory != nil {
 		h.AddrsFactory = opts.AddrsFactory
 	}
+	// This is a terrible hack.
+	// We want to use this AddrsFactory for autonat. Wrapping AddrsFactory here ensures
+	// that autonat receives addresses with the correct certhashes.
+	//
+	// This logic cannot be in Addrs method as autonat cannot use the Addrs method directly.
+	// The autorelay package updates AddrsFactory to only provide p2p-circuit addresses when
+	// reachability is Private.
+	//
+	// Wrapping it here allows us to provide the wrapped AddrsFactory to autonat before
+	// autorelay updates it.
+	addrFactory := h.AddrsFactory
+	h.AddrsFactory = func(addrs []ma.Multiaddr) []ma.Multiaddr {
+		return h.addCertHashes(addrFactory(addrs))
+	}
 
 	if opts.NATManager != nil {
 		h.natmgr = opts.NATManager(n)
@@ -804,47 +818,13 @@ func (h *BasicHost) ConnManager() connmgr.ConnManager {
 // Addrs returns listening addresses that are safe to announce to the network.
 // The output is the same as AllAddrs, but processed by AddrsFactory.
 func (h *BasicHost) Addrs() []ma.Multiaddr {
-	// This is a temporary workaround/hack that fixes #2233. Once we have a
-	// proper address pipeline, rework this. See the issue for more context.
-	type transportForListeninger interface {
-		TransportForListening(a ma.Multiaddr) transport.Transport
-	}
-
-	type addCertHasher interface {
-		AddCertHashes(m ma.Multiaddr) (ma.Multiaddr, bool)
-	}
-
+	// We don't need to append certhashes here, the user provided addrsFactory was
+	// wrapped with addCertHashes in the constructor.
 	addrs := h.AddrsFactory(h.AllAddrs())
-
-	s, ok := h.Network().(transportForListeninger)
-	if !ok {
-		return addrs
-	}
-
-	// Copy addrs slice since we'll be modifying it.
-	addrsOld := addrs
-	addrs = make([]ma.Multiaddr, len(addrsOld))
-	copy(addrs, addrsOld)
-
-	for i, addr := range addrs {
-		wtOK, wtN := libp2pwebtransport.IsWebtransportMultiaddr(addr)
-		webrtcOK, webrtcN := libp2pwebrtc.IsWebRTCDirectMultiaddr(addr)
-		if (wtOK && wtN == 0) || (webrtcOK && webrtcN == 0) {
-			t := s.TransportForListening(addr)
-			tpt, ok := t.(addCertHasher)
-			if !ok {
-				continue
-			}
-			addrWithCerthash, added := tpt.AddCertHashes(addr)
-			if !added {
-				log.Debugf("Couldn't add certhashes to multiaddr: %s", addr)
-				continue
-			}
-			addrs[i] = addrWithCerthash
-		}
-	}
-
-	return addrs
+	// Make a copy. Consumers can modify the slice elements
+	res := make([]ma.Multiaddr, len(addrs))
+	copy(res, addrs)
+	return res
 }
 
 // NormalizeMultiaddr returns a multiaddr suitable for equality checks.
@@ -864,8 +844,9 @@ func (h *BasicHost) NormalizeMultiaddr(addr ma.Multiaddr) ma.Multiaddr {
 	return addr
 }
 
-// AllAddrs returns all the addresses of BasicHost at this moment in time.
-// It's ok to not include addresses if they're not available to be used now.
+// AllAddrs returns all the addresses the host is listening on except circuit addresses.
+// The output has webtransport addresses inferred from quic addresses.
+// All the addresses have the correct
 func (h *BasicHost) AllAddrs() []ma.Multiaddr {
 	listenAddrs := h.Network().ListenAddresses()
 	if len(listenAddrs) == 0 {
@@ -959,8 +940,48 @@ func (h *BasicHost) AllAddrs() []ma.Multiaddr {
 	}
 	finalAddrs = ma.Unique(finalAddrs)
 	finalAddrs = inferWebtransportAddrsFromQuic(finalAddrs)
-
 	return finalAddrs
+}
+
+func (h *BasicHost) addCertHashes(addrs []ma.Multiaddr) []ma.Multiaddr {
+	// This is a temporary workaround/hack that fixes #2233. Once we have a
+	// proper address pipeline, rework this. See the issue for more context.
+	type transportForListeninger interface {
+		TransportForListening(a ma.Multiaddr) transport.Transport
+	}
+
+	type addCertHasher interface {
+		AddCertHashes(m ma.Multiaddr) (ma.Multiaddr, bool)
+	}
+
+	s, ok := h.Network().(transportForListeninger)
+	if !ok {
+		return addrs
+	}
+
+	// Copy addrs slice since we'll be modifying it.
+	addrsOld := addrs
+	addrs = make([]ma.Multiaddr, len(addrsOld))
+	copy(addrs, addrsOld)
+
+	for i, addr := range addrs {
+		wtOK, wtN := libp2pwebtransport.IsWebtransportMultiaddr(addr)
+		webrtcOK, webrtcN := libp2pwebrtc.IsWebRTCDirectMultiaddr(addr)
+		if (wtOK && wtN == 0) || (webrtcOK && webrtcN == 0) {
+			t := s.TransportForListening(addr)
+			tpt, ok := t.(addCertHasher)
+			if !ok {
+				continue
+			}
+			addrWithCerthash, added := tpt.AddCertHashes(addr)
+			if !added {
+				log.Debugf("Couldn't add certhashes to multiaddr: %s", addr)
+				continue
+			}
+			addrs[i] = addrWithCerthash
+		}
+	}
+	return addrs
 }
 
 var wtComponent = ma.StringCast("/webtransport")

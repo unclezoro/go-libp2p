@@ -407,9 +407,9 @@ func (cfg *Config) newBasicHost(swrm *swarm.Swarm, eventBus event.Bus) (*bhost.B
 		// addresses by default.
 		//
 		// TODO: We shouldn't be doing this here.
-		oldFactory := h.AddrsFactory
+		originalAddrFactory := h.AddrsFactory
 		h.AddrsFactory = func(addrs []ma.Multiaddr) []ma.Multiaddr {
-			return oldFactory(autorelay.Filter(addrs))
+			return originalAddrFactory(autorelay.Filter(addrs))
 		}
 	}
 	return h, nil
@@ -486,26 +486,36 @@ func (cfg *Config) NewNode() (host.Host, error) {
 		)
 	}
 
-	// Note: h.AddrsFactory may be changed by relayFinder, but non-relay version is
-	// used by AutoNAT below.
-	if cfg.EnableAutoRelay {
-		if !cfg.DisableMetrics {
-			mt := autorelay.WithMetricsTracer(
-				autorelay.NewMetricsTracer(autorelay.WithRegisterer(cfg.PrometheusRegisterer)))
-			mtOpts := []autorelay.Option{mt}
-			cfg.AutoRelayOpts = append(mtOpts, cfg.AutoRelayOpts...)
-		}
-		fxopts = append(fxopts,
-			fx.Invoke(func(h *bhost.BasicHost, lifecycle fx.Lifecycle) (*autorelay.AutoRelay, error) {
+	// originalAddrFactory is the AddrFactory before it's modified by autorelay
+	// we need this for checking reachability via autonat
+	originalAddrFactory := func(addrs []ma.Multiaddr) []ma.Multiaddr {
+		return addrs
+	}
+
+	// enable autorelay
+	fxopts = append(fxopts,
+		fx.Invoke(func(h *bhost.BasicHost) {
+			originalAddrFactory = h.AddrsFactory
+		}),
+		fx.Invoke(func(h *bhost.BasicHost, lifecycle fx.Lifecycle) error {
+			if cfg.EnableAutoRelay {
+				if !cfg.DisableMetrics {
+					mt := autorelay.WithMetricsTracer(
+						autorelay.NewMetricsTracer(autorelay.WithRegisterer(cfg.PrometheusRegisterer)))
+					mtOpts := []autorelay.Option{mt}
+					cfg.AutoRelayOpts = append(mtOpts, cfg.AutoRelayOpts...)
+				}
+
 				ar, err := autorelay.NewAutoRelay(h, cfg.AutoRelayOpts...)
 				if err != nil {
-					return nil, err
+					return err
 				}
 				lifecycle.Append(fx.StartStopHook(ar.Start, ar.Close))
-				return ar, nil
-			}),
-		)
-	}
+				return nil
+			}
+			return nil
+		}),
+	)
 
 	var bh *bhost.BasicHost
 	fxopts = append(fxopts, fx.Invoke(func(bho *bhost.BasicHost) { bh = bho }))
@@ -523,7 +533,7 @@ func (cfg *Config) NewNode() (host.Host, error) {
 		return nil, err
 	}
 
-	if err := cfg.addAutoNAT(bh); err != nil {
+	if err := cfg.addAutoNAT(bh, originalAddrFactory); err != nil {
 		app.Stop(context.Background())
 		if cfg.Routing != nil {
 			rh.Close()
@@ -539,8 +549,7 @@ func (cfg *Config) NewNode() (host.Host, error) {
 	return &closableBasicHost{App: app, BasicHost: bh}, nil
 }
 
-func (cfg *Config) addAutoNAT(h *bhost.BasicHost) error {
-	addrF := h.AddrsFactory
+func (cfg *Config) addAutoNAT(h *bhost.BasicHost, addrF AddrsFactory) error {
 	autonatOpts := []autonat.Option{
 		autonat.UsingAddresses(func() []ma.Multiaddr {
 			return addrF(h.AllAddrs())

@@ -465,3 +465,26 @@ func TestDialCircuitAddrWithWrappedResourceManager(t *testing.T) {
 	require.NoError(t, res.Error)
 	defer cancel()
 }
+
+func TestHostAddrsFactoryAddsCerthashes(t *testing.T) {
+	addr := ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1/webtransport")
+	h, err := New(
+		AddrsFactory(func(m []ma.Multiaddr) []ma.Multiaddr {
+			return []ma.Multiaddr{addr}
+		}),
+	)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		addrs := h.Addrs()
+		for _, a := range addrs {
+			first, last := ma.SplitFunc(a, func(c ma.Component) bool {
+				return c.Protocol().Code == ma.P_CERTHASH
+			})
+			if addr.Equal(first) && last != nil {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond)
+	h.Close()
+}
