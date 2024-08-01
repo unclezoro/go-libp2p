@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +26,9 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	tls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
+	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
+	libp2pwebrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
 	webtransport "github.com/libp2p/go-libp2p/p2p/transport/webtransport"
 	"go.uber.org/goleak"
 
@@ -416,6 +420,7 @@ func TestMain(m *testing.M) {
 		m,
 		// This will return eventually (5s timeout) but doesn't take a context.
 		goleak.IgnoreAnyFunction("github.com/koron/go-ssdp.Search"),
+		goleak.IgnoreAnyFunction("github.com/pion/sctp.(*Stream).SetReadDeadline.func1"),
 		// Logging & Stats
 		goleak.IgnoreTopFunction("github.com/ipfs/go-log/v2/writer.(*MirrorWriter).logRoutine"),
 		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
@@ -489,4 +494,85 @@ func TestHostAddrsFactoryAddsCerthashes(t *testing.T) {
 		return false
 	}, 5*time.Second, 50*time.Millisecond)
 	h.Close()
+}
+
+func TestWebRTCReuseAddrWithQUIC(t *testing.T) {
+	order := [][]string{
+		{"/ip4/127.0.0.1/udp/54322/quic-v1", "/ip4/127.0.0.1/udp/54322/webrtc-direct"},
+		{"/ip4/127.0.0.1/udp/54322/webrtc-direct", "/ip4/127.0.0.1/udp/54322/quic-v1"},
+		// We do not support WebRTC automatically reusing QUIC addresses if port is not specified, yet.
+		// {"/ip4/127.0.0.1/udp/0/webrtc-direct", "/ip4/127.0.0.1/udp/0/quic-v1"},
+	}
+	for i, addrs := range order {
+		t.Run("Order "+strconv.Itoa(i), func(t *testing.T) {
+			h1, err := New(ListenAddrStrings(addrs...), Transport(quic.NewTransport), Transport(libp2pwebrtc.New))
+			require.NoError(t, err)
+			defer h1.Close()
+
+			seenPorts := make(map[string]struct{})
+			for _, addr := range h1.Addrs() {
+				s, err := addr.ValueForProtocol(ma.P_UDP)
+				require.NoError(t, err)
+				seenPorts[s] = struct{}{}
+			}
+			require.Len(t, seenPorts, 1)
+
+			quicClient, err := New(NoListenAddrs, Transport(quic.NewTransport))
+			require.NoError(t, err)
+			defer quicClient.Close()
+
+			webrtcClient, err := New(NoListenAddrs, Transport(libp2pwebrtc.New))
+			require.NoError(t, err)
+			defer webrtcClient.Close()
+
+			for _, client := range []host.Host{quicClient, webrtcClient} {
+				err := client.Connect(context.Background(), peer.AddrInfo{ID: h1.ID(), Addrs: h1.Addrs()})
+				require.NoError(t, err)
+			}
+
+			t.Run("quic client can connect", func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				p := ping.NewPingService(quicClient)
+				resCh := p.Ping(ctx, h1.ID())
+				res := <-resCh
+				require.NoError(t, res.Error)
+			})
+
+			t.Run("webrtc client can connect", func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				p := ping.NewPingService(webrtcClient)
+				resCh := p.Ping(ctx, h1.ID())
+				res := <-resCh
+				require.NoError(t, res.Error)
+			})
+		})
+	}
+
+	swapPort := func(addrStrs []string, newPort string) []string {
+		out := make([]string, 0, len(addrStrs))
+		for _, addrStr := range addrStrs {
+			out = append(out, strings.Replace(addrStr, "54322", newPort, 1))
+		}
+		return out
+	}
+
+	t.Run("setup with no reuseport. Should fail", func(t *testing.T) {
+		h1, err := New(ListenAddrStrings(swapPort(order[0], "54323")...), Transport(quic.NewTransport), Transport(libp2pwebrtc.New), QUICReuse(quicreuse.NewConnManager, quicreuse.DisableReuseport()))
+		require.NoError(t, err) // It's a bug/feature that swarm.Listen does not error if at least one transport succeeds in listening.
+		defer h1.Close()
+		// Check that webrtc did fail to listen
+		require.Equal(t, 1, len(h1.Addrs()))
+		require.Contains(t, h1.Addrs()[0].String(), "quic-v1")
+	})
+
+	t.Run("setup with autonat", func(t *testing.T) {
+		h1, err := New(EnableAutoNATv2(), ListenAddrStrings(swapPort(order[0], "54324")...), Transport(quic.NewTransport), Transport(libp2pwebrtc.New), QUICReuse(quicreuse.NewConnManager, quicreuse.DisableReuseport()))
+		require.NoError(t, err) // It's a bug/feature that swarm.Listen does not error if at least one transport succeeds in listening.
+		defer h1.Close()
+		// Check that webrtc did fail to listen
+		require.Equal(t, 1, len(h1.Addrs()))
+		require.Contains(t, h1.Addrs()[0].String(), "quic-v1")
+	})
 }

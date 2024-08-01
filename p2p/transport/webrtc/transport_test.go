@@ -29,12 +29,16 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+var netListenUDP ListenUDPFn = func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+	return net.ListenUDP(network, laddr)
+}
+
 func getTransport(t *testing.T, opts ...Option) (*WebRTCTransport, peer.ID) {
 	t.Helper()
 	privKey, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
 	require.NoError(t, err)
 	rcmgr := &network.NullResourceManager{}
-	transport, err := New(privKey, nil, nil, rcmgr, opts...)
+	transport, err := New(privKey, nil, nil, rcmgr, netListenUDP, opts...)
 	require.NoError(t, err)
 	peerID, err := peer.IDFromPrivateKey(privKey)
 	require.NoError(t, err)
@@ -45,7 +49,7 @@ func getTransport(t *testing.T, opts ...Option) (*WebRTCTransport, peer.ID) {
 func TestNullRcmgrTransport(t *testing.T) {
 	privKey, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
 	require.NoError(t, err)
-	transport, err := New(privKey, nil, nil, nil)
+	transport, err := New(privKey, nil, nil, nil, netListenUDP)
 	require.NoError(t, err)
 
 	listenTransport, pid := getTransport(t)

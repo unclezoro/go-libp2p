@@ -154,6 +154,28 @@ func (c *ConnManager) onListenerClosed(key string) {
 	}
 }
 
+func (c *ConnManager) SharedNonQUICPacketConn(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+	c.quicListenersMu.Lock()
+	defer c.quicListenersMu.Unlock()
+	key := laddr.String()
+	entry, ok := c.quicListeners[key]
+	if !ok {
+		return nil, errors.New("expected to be able to share with a QUIC listener, but no QUIC listener found. The QUIC listener should start first")
+	}
+	t := entry.ln.transport
+	if t, ok := t.(*refcountedTransport); ok {
+		t.IncreaseCount()
+		ctx, cancel := context.WithCancel(context.Background())
+		return &nonQUICPacketConn{
+			ctx:             ctx,
+			ctxCancel:       cancel,
+			owningTransport: t,
+			tr:              &t.Transport,
+		}, nil
+	}
+	return nil, errors.New("expected to be able to share with a QUIC listener, but the QUIC listener is not using a refcountedTransport. `DisableReuseport` should not be set")
+}
+
 func (c *ConnManager) transportForListen(network string, laddr *net.UDPAddr) (refCountedQuicTransport, error) {
 	if c.enableReuseport {
 		reuse, err := c.getReuse(network)

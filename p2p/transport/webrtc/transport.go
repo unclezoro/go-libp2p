@@ -26,6 +26,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/sec"
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
+	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/webrtc/pb"
 	"github.com/libp2p/go-msgio"
 
@@ -78,6 +79,8 @@ type WebRTCTransport struct {
 	noiseTpt     *noise.Transport
 	localPeerId  peer.ID
 
+	listenUDP func(network string, laddr *net.UDPAddr) (net.PacketConn, error)
+
 	// timeouts
 	peerConnectionTimeouts iceTimeouts
 
@@ -95,7 +98,9 @@ type iceTimeouts struct {
 	Keepalive  time.Duration
 }
 
-func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr network.ResourceManager, opts ...Option) (*WebRTCTransport, error) {
+type ListenUDPFn func(network string, laddr *net.UDPAddr) (net.PacketConn, error)
+
+func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr network.ResourceManager, listenUDP ListenUDPFn, opts ...Option) (*WebRTCTransport, error) {
 	if psk != nil {
 		log.Error("WebRTC doesn't support private networks yet.")
 		return nil, fmt.Errorf("WebRTC doesn't support private networks yet")
@@ -141,6 +146,7 @@ func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr 
 		noiseTpt:     noiseTpt,
 		localPeerId:  localPeerID,
 
+		listenUDP: listenUDP,
 		peerConnectionTimeouts: iceTimeouts{
 			Disconnect: DefaultDisconnectedTimeout,
 			Failed:     DefaultFailedTimeout,
@@ -155,6 +161,10 @@ func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr 
 		}
 	}
 	return transport, nil
+}
+
+func (t *WebRTCTransport) ListenOrder() int {
+	return libp2pquic.ListenOrder + 1 // We want to listen after QUIC listens so we can possibly reuse the same port.
 }
 
 func (t *WebRTCTransport) Protocols() []int {
@@ -190,7 +200,7 @@ func (t *WebRTCTransport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
 		return nil, fmt.Errorf("listener could not resolve udp address: %w", err)
 	}
 
-	socket, err := net.ListenUDP(nw, udpAddr)
+	socket, err := t.listenUDP(nw, udpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen on udp: %w", err)
 	}
@@ -203,7 +213,7 @@ func (t *WebRTCTransport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
 	return listener, nil
 }
 
-func (t *WebRTCTransport) listenSocket(socket *net.UDPConn) (tpt.Listener, error) {
+func (t *WebRTCTransport) listenSocket(socket net.PacketConn) (tpt.Listener, error) {
 	listenerMultiaddr, err := manet.FromNetAddr(socket.LocalAddr())
 	if err != nil {
 		return nil, err
