@@ -44,9 +44,9 @@ require (
 	github.com/multiformats/go-varint v0.0.7
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58
 	github.com/pion/datachannel v1.5.8
-	github.com/pion/ice/v2 v2.3.31
+	github.com/pion/ice/v2 v2.3.32
 	github.com/pion/logging v0.2.2
-	github.com/pion/sctp v1.8.19
+	github.com/pion/sctp v1.8.20
 	github.com/pion/stun v0.6.1
 	github.com/pion/webrtc/v3 v3.2.50
 	github.com/prometheus/client_golang v1.19.1
@@ -106,7 +106,7 @@ require (
 	github.com/pion/mdns v0.0.12 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.14 // indirect
-	github.com/pion/rtp v1.8.7 // indirect
+	github.com/pion/rtp v1.8.8 // indirect
 	github.com/pion/sdp/v3 v3.0.9 // indirect
 	github.com/pion/srtp/v2 v2.0.20 // indirect
 	github.com/pion/transport/v2 v2.2.9 // indirect
