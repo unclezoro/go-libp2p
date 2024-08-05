@@ -32,6 +32,8 @@ const (
 	// This includes the time between dialing the raw network connection,
 	// protocol selection as well the handshake, if applicable.
 	defaultDialTimeoutLocal = 5 * time.Second
+
+	defaultNewStreamTimeout = 15 * time.Second
 )
 
 var log = logging.Logger("swarm2")
