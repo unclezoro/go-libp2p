@@ -4,6 +4,8 @@ go 1.21
 
 retract v0.26.1 // Tag was applied incorrectly due to a bug in the release workflow.
 
+retract v0.36.0 // Accidentally modified the tag.
+
 require (
 	github.com/benbjohnson/clock v1.3.5
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c
