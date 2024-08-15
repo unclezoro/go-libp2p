@@ -13,7 +13,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -429,24 +428,15 @@ func TestMain(m *testing.M) {
 }
 
 func TestDialCircuitAddrWithWrappedResourceManager(t *testing.T) {
-	relay, err := New(EnableRelayService())
+	relay, err := New(EnableRelayService(), ForceReachabilityPublic())
 	require.NoError(t, err)
 	defer relay.Close()
 
-	// Fake that the relay is publicly reachable
-	emitterForRelay, err := relay.EventBus().Emitter(&event.EvtLocalReachabilityChanged{})
-	require.NoError(t, err)
-	defer emitterForRelay.Close()
-	emitterForRelay.Emit(event.EvtLocalReachabilityChanged{Reachability: network.ReachabilityPublic})
-
-	peerBehindRelay, err := New(EnableAutoRelayWithStaticRelays([]peer.AddrInfo{{ID: relay.ID(), Addrs: relay.Addrs()}}))
+	peerBehindRelay, err := New(
+		EnableAutoRelayWithStaticRelays([]peer.AddrInfo{{ID: relay.ID(), Addrs: relay.Addrs()}}),
+		ForceReachabilityPrivate())
 	require.NoError(t, err)
 	defer peerBehindRelay.Close()
-	// Emit an event to tell this peer it is private
-	emitterForPeerBehindRelay, err := peerBehindRelay.EventBus().Emitter(&event.EvtLocalReachabilityChanged{})
-	require.NoError(t, err)
-	defer emitterForPeerBehindRelay.Close()
-	emitterForPeerBehindRelay.Emit(event.EvtLocalReachabilityChanged{Reachability: network.ReachabilityPrivate})
 
 	// Use a wrapped resource manager to test that the circuit dialing works
 	// with it. Look at the PR introducing this test for context
@@ -467,10 +457,12 @@ func TestDialCircuitAddrWithWrappedResourceManager(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	res := <-ping.Ping(ctx, h, peerBehindRelay.ID())
-	require.NoError(t, res.Error)
-	defer cancel()
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		res := <-ping.Ping(ctx, h, peerBehindRelay.ID())
+		return res.Error == nil
+	}, 5*time.Second, 50*time.Millisecond)
 }
 
 func TestHostAddrsFactoryAddsCerthashes(t *testing.T) {

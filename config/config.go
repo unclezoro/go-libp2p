@@ -368,7 +368,7 @@ func (cfg *Config) addTransports() ([]fx.Option, error) {
 		fxopts = append(fxopts, cfg.QUICReuse...)
 	} else {
 		fxopts = append(fxopts,
-			fx.Provide(func(key quic.StatelessResetKey, tokenGenerator quic.TokenGeneratorKey, _ *swarm.Swarm, lifecycle fx.Lifecycle) (*quicreuse.ConnManager, error) {
+			fx.Provide(func(key quic.StatelessResetKey, tokenGenerator quic.TokenGeneratorKey, lifecycle fx.Lifecycle) (*quicreuse.ConnManager, error) {
 				var opts []quicreuse.Option
 				if !cfg.DisableMetrics {
 					opts = append(opts, quicreuse.EnableMetrics(cfg.PrometheusRegisterer))
@@ -469,18 +469,17 @@ func (cfg *Config) NewNode() (host.Host, error) {
 		fx.Provide(func() event.Bus {
 			return eventbus.NewBus(eventbus.WithMetricsTracer(eventbus.NewMetricsTracer(eventbus.WithRegisterer(cfg.PrometheusRegisterer))))
 		}),
-		fx.Provide(func(eventBus event.Bus, lifecycle fx.Lifecycle) (*swarm.Swarm, error) {
-			sw, err := cfg.makeSwarm(eventBus, !cfg.DisableMetrics)
-			if err != nil {
-				return nil, err
-			}
-			lifecycle.Append(fx.StopHook(sw.Close))
-			return sw, nil
+		fx.Provide(func() crypto.PrivKey {
+			return cfg.PeerKey
 		}),
 		// Make sure the swarm constructor depends on the quicreuse.ConnManager.
 		// That way, the ConnManager will be started before the swarm, and more importantly,
 		// the swarm will be stopped before the ConnManager.
-		fx.Decorate(func(sw *swarm.Swarm, _ *quicreuse.ConnManager, lifecycle fx.Lifecycle) *swarm.Swarm {
+		fx.Provide(func(eventBus event.Bus, _ *quicreuse.ConnManager, lifecycle fx.Lifecycle) (*swarm.Swarm, error) {
+			sw, err := cfg.makeSwarm(eventBus, !cfg.DisableMetrics)
+			if err != nil {
+				return nil, err
+			}
 			lifecycle.Append(fx.Hook{
 				OnStart: func(context.Context) error {
 					// TODO: This method succeeds if listening on one address succeeds. We
@@ -491,14 +490,13 @@ func (cfg *Config) NewNode() (host.Host, error) {
 					return sw.Close()
 				},
 			})
-			return sw
+			return sw, nil
 		}),
 		fx.Provide(cfg.newBasicHost),
 		fx.Provide(func(bh *bhost.BasicHost) host.Host {
 			return bh
 		}),
 		fx.Provide(func(h *swarm.Swarm) peer.ID { return h.LocalPeer() }),
-		fx.Provide(func(h *swarm.Swarm) crypto.PrivKey { return h.Peerstore().PrivKey(h.LocalPeer()) }),
 	}
 	transportOpts, err := cfg.addTransports()
 	if err != nil {

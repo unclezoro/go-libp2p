@@ -1080,6 +1080,10 @@ func (h *BasicHost) Close() error {
 		_ = h.emitters.evtLocalProtocolsUpdated.Close()
 		_ = h.emitters.evtLocalAddrsUpdated.Close()
 
+		if err := h.network.Close(); err != nil {
+			log.Errorf("swarm close failed: %v", err)
+		}
+
 		h.psManager.Close()
 		if h.Peerstore() != nil {
 			h.Peerstore().Close()
