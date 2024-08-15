@@ -1009,3 +1009,28 @@ func TestManyConnections(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionClosedWhenRemoteCloses(t *testing.T) {
+	listenT, p := getTransport(t)
+	listener, err := listenT.Listen(ma.StringCast("/ip4/127.0.0.1/udp/0/webrtc-direct"))
+	require.NoError(t, err)
+
+	dialer, _ := getTransport(t)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c, err := listener.Accept()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.Eventually(t, func() bool {
+			return c.IsClosed()
+		}, 5*time.Second, 50*time.Millisecond)
+	}()
+
+	c, err := dialer.Dial(context.Background(), listener.Multiaddr(), p)
+	require.NoError(t, err)
+	c.Close()
+	wg.Wait()
+}
