@@ -1014,13 +1014,16 @@ func TestConnectionClosedWhenRemoteCloses(t *testing.T) {
 	listenT, p := getTransport(t)
 	listener, err := listenT.Listen(ma.StringCast("/ip4/127.0.0.1/udp/0/webrtc-direct"))
 	require.NoError(t, err)
+	defer listener.Close()
 
+	accepted := make(chan struct{})
 	dialer, _ := getTransport(t)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		c, err := listener.Accept()
+		close(accepted)
 		if !assert.NoError(t, err) {
 			return
 		}
@@ -1031,6 +1034,7 @@ func TestConnectionClosedWhenRemoteCloses(t *testing.T) {
 
 	c, err := dialer.Dial(context.Background(), listener.Multiaddr(), p)
 	require.NoError(t, err)
+	<-accepted
 	c.Close()
 	wg.Wait()
 }
