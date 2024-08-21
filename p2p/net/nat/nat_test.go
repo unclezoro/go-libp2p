@@ -45,7 +45,8 @@ func TestAddMapping(t *testing.T) {
 	require.False(t, found, "didn't expect a port mapping for unmapped protocol")
 	mapped, found := nat.GetMapping("tcp", 10000)
 	require.True(t, found, "expected port mapping")
-	require.Equal(t, netip.AddrPortFrom(netip.AddrFrom4([4]byte{1, 2, 3, 4}), 1234), mapped)
+	addr, _ := netip.AddrFromSlice(net.IPv4(1, 2, 3, 4))
+	require.Equal(t, netip.AddrPortFrom(addr, 1234), mapped)
 }
 
 func TestRemoveMapping(t *testing.T) {
