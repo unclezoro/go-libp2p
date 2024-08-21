@@ -51,6 +51,17 @@ func (t *tester) runTests(passThruFlags []string) error {
 	}
 	log.Printf("Not all tests passed: %v", err)
 
+	timedOutPackages, err := t.findTimedoutTests(context.Background())
+	if err != nil {
+		return err
+	}
+	if len(timedOutPackages) > 0 {
+		// Fail immediately if we find any timeouts. We'd have to run all tests
+		// in the package, and this could take a long time.
+		log.Printf("Found %d timed out packages. Failing", len(timedOutPackages))
+		return errors.New("one or more tests timed out")
+	}
+
 	failedTests, err := t.findFailedTests(context.Background())
 	if err != nil {
 		return err
@@ -129,6 +140,11 @@ type failedTest struct {
 	Test    string
 }
 
+type timedOutPackage struct {
+	Package string
+	Outputs string
+}
+
 func (t *tester) findFailedTests(ctx context.Context) ([]failedTest, error) {
 	db, err := sql.Open("sqlite", t.Dir+dbPath)
 	if err != nil {
@@ -147,6 +163,49 @@ func (t *tester) findFailedTests(ctx context.Context) ([]failedTest, error) {
 			return nil, err
 		}
 		out = append(out, failedTest{pkg, test})
+	}
+	return out, nil
+}
+
+func (t *tester) findTimedoutTests(ctx context.Context) ([]timedOutPackage, error) {
+	db, err := sql.Open("sqlite", t.Dir+dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, `WITH failed_packages AS (
+    SELECT
+        Package
+    FROM
+        test_results
+    WHERE
+        Action = 'fail'
+        AND Elapsed > 300
+)
+SELECT
+	test_results.Package, GROUP_CONCAT(Output, "") as Outputs
+FROM
+    test_results
+INNER JOIN
+    failed_packages
+ON
+    test_results.Package = failed_packages.Package
+GROUP BY
+    test_results.Package
+HAVING
+    Outputs LIKE '%timed out%'
+ORDER BY Time;`)
+	if err != nil {
+		return nil, err
+	}
+	var out []timedOutPackage
+	for rows.Next() {
+		var pkg, outputs string
+		if err := rows.Scan(&pkg, &outputs); err != nil {
+			return nil, err
+		}
+		out = append(out, timedOutPackage{pkg, outputs})
 	}
 	return out, nil
 }
@@ -170,20 +229,45 @@ func (t *tester) summarize() (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	plural := "s"
-	if len(testFailures) == 1 {
-		plural = ""
-	}
-	out.WriteString(fmt.Sprintf("## %d Test Failure%s\n\n", len(testFailures), plural))
-
-	db, err := sql.Open("sqlite", t.Dir+dbPath)
+	timeouts, err := t.findTimedoutTests(ctx)
 	if err != nil {
 		return "", err
 	}
-	defer db.Close()
 
-	rows, err := db.QueryContext(ctx, `SELECT
+	testFailureCount := len(testFailures) + len(timeouts)
+
+	plural := "s"
+	if testFailureCount == 1 {
+		plural = ""
+	}
+	out.WriteString(fmt.Sprintf("## %d Test Failure%s\n\n", testFailureCount, plural))
+
+	if len(timeouts) > 0 {
+		out.WriteString("### Timed Out Tests\n\n")
+		for _, timeout := range timeouts {
+			_, err = out.WriteString(fmt.Sprintf(`<details>
+<summary>%s</summary>
+<pre>
+%s
+</pre>
+</details>`, timeout.Package, timeout.Outputs))
+			if err != nil {
+				return "", err
+			}
+		}
+		out.WriteString("\n")
+	}
+
+	if len(testFailures) > 0 {
+		out.WriteString("### Failed Tests\n\n")
+
+		db, err := sql.Open("sqlite", t.Dir+dbPath)
+		if err != nil {
+			return "", err
+		}
+		defer db.Close()
+
+		rows, err := db.QueryContext(ctx, `SELECT
     tr_output.Package,
     tr_output.Test,
     GROUP_CONCAT(tr_output.Output,  "") AS Outputs
@@ -204,22 +288,23 @@ GROUP BY
     tr_output.Test
 ORDER BY
     MIN(tr_output.Time);`)
-	if err != nil {
-		return "", err
-	}
-	for rows.Next() {
-		var pkg, test, outputs string
-		if err := rows.Scan(&pkg, &test, &outputs); err != nil {
+		if err != nil {
 			return "", err
 		}
-		_, err = out.WriteString(fmt.Sprintf(`<details>
+		for rows.Next() {
+			var pkg, test, outputs string
+			if err := rows.Scan(&pkg, &test, &outputs); err != nil {
+				return "", err
+			}
+			_, err = out.WriteString(fmt.Sprintf(`<details>
 <summary>%s.%s</summary>
 <pre>
 %s
 </pre>
 </details>`, pkg, test, outputs))
-		if err != nil {
-			return "", err
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 	return out.String(), nil
