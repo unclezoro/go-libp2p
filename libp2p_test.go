@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"regexp"
@@ -586,4 +587,71 @@ func TestWebRTCReuseAddrWithQUIC(t *testing.T) {
 		require.Equal(t, 1, len(h1.Addrs()))
 		require.Contains(t, h1.Addrs()[0].String(), "quic-v1")
 	})
+}
+
+func TestUseCorrectTransportForDialOut(t *testing.T) {
+	listAddrOrder := [][]string{
+		{"/ip4/127.0.0.1/udp/0/quic-v1", "/ip4/127.0.0.1/udp/0/quic-v1/webtransport"},
+		{"/ip4/127.0.0.1/udp/0/quic-v1/webtransport", "/ip4/127.0.0.1/udp/0/quic-v1"},
+		{"/ip4/0.0.0.0/udp/0/quic-v1", "/ip4/0.0.0.0/udp/0/quic-v1/webtransport"},
+		{"/ip4/0.0.0.0/udp/0/quic-v1/webtransport", "/ip4/0.0.0.0/udp/0/quic-v1"},
+	}
+	for _, order := range listAddrOrder {
+		h1, err := New(ListenAddrStrings(order...), Transport(quic.NewTransport), Transport(webtransport.New))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			h1.Close()
+		})
+
+		go func() {
+			h1.SetStreamHandler("/echo-port", func(s network.Stream) {
+				m := s.Conn().RemoteMultiaddr()
+				v, err := m.ValueForProtocol(ma.P_UDP)
+				if err != nil {
+					s.Reset()
+					return
+				}
+				s.Write([]byte(v))
+				s.Close()
+			})
+		}()
+
+		for _, addr := range h1.Addrs() {
+			t.Run("order "+strings.Join(order, ",")+" Dial to "+addr.String(), func(t *testing.T) {
+				h2, err := New(ListenAddrStrings(
+					"/ip4/0.0.0.0/udp/0/quic-v1",
+					"/ip4/0.0.0.0/udp/0/quic-v1/webtransport",
+				), Transport(quic.NewTransport), Transport(webtransport.New))
+				require.NoError(t, err)
+				defer h2.Close()
+				t.Log("H2 Addrs", h2.Addrs())
+				var myExpectedDialOutAddr ma.Multiaddr
+				addrIsWT, _ := webtransport.IsWebtransportMultiaddr(addr)
+				isLocal := func(a ma.Multiaddr) bool {
+					return strings.Contains(a.String(), "127.0.0.1")
+				}
+				addrIsLocal := isLocal(addr)
+				for _, a := range h2.Addrs() {
+					aIsWT, _ := webtransport.IsWebtransportMultiaddr(a)
+					if addrIsWT == aIsWT && isLocal(a) == addrIsLocal {
+						myExpectedDialOutAddr = a
+						break
+					}
+				}
+
+				err = h2.Connect(context.Background(), peer.AddrInfo{ID: h1.ID(), Addrs: []ma.Multiaddr{addr}})
+				require.NoError(t, err)
+
+				s, err := h2.NewStream(context.Background(), h1.ID(), "/echo-port")
+				require.NoError(t, err)
+
+				port, err := io.ReadAll(s)
+				require.NoError(t, err)
+
+				myExpectedPort, err := myExpectedDialOutAddr.ValueForProtocol(ma.P_UDP)
+				require.NoError(t, err)
+				require.Equal(t, myExpectedPort, string(port))
+			})
+		}
+	}
 }

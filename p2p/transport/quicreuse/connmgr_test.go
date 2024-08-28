@@ -61,8 +61,6 @@ func testListenOnSameProto(t *testing.T, enableReuseport bool) {
 
 	const alpn = "proto"
 
-	var tlsConf tls.Config
-	tlsConf.NextProtos = []string{alpn}
 	ln1, err := cm.ListenQUIC(ma.StringCast("/ip4/127.0.0.1/udp/0/quic-v1"), &tls.Config{NextProtos: []string{alpn}}, nil)
 	require.NoError(t, err)
 	defer ln1.Close()
@@ -96,7 +94,7 @@ func TestConnectionPassedToQUICForListening(t *testing.T) {
 
 	_, err = cm.ListenQUIC(raddr, &tls.Config{NextProtos: []string{"proto"}}, nil)
 	require.NoError(t, err)
-	quicTr, err := cm.transportForListen(netw, naddr)
+	quicTr, err := cm.transportForListen(nil, netw, naddr)
 	require.NoError(t, err)
 	defer quicTr.Close()
 	if _, ok := quicTr.(*singleOwnerTransport).Transport.Conn.(quic.OOBCapablePacketConn); !ok {
