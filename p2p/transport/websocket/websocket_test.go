@@ -293,8 +293,7 @@ func TestDialWssNoClientCert(t *testing.T) {
 }
 
 func TestWebsocketTransport(t *testing.T) {
-	t.Skip("This test is failing, see https://github.com/libp2p/go-ws-transport/issues/99")
-	_, ua := newUpgrader(t)
+	peerA, ua := newUpgrader(t)
 	ta, err := New(ua, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +304,7 @@ func TestWebsocketTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ttransport.SubtestTransport(t, ta, tb, "/ip4/127.0.0.1/tcp/0/ws", "peerA")
+	ttransport.SubtestTransport(t, ta, tb, "/ip4/127.0.0.1/tcp/0/ws", peerA)
 }
 
 func isWSS(addr ma.Multiaddr) bool {
