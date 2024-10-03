@@ -500,6 +500,7 @@ func (h *BasicHost) makeUpdatedAddrEvent(prev, current []ma.Multiaddr) *event.Ev
 		return nil
 	}
 	prevmap := make(map[string]ma.Multiaddr, len(prev))
+	currmap := make(map[string]ma.Multiaddr, len(current))
 	evt := &event.EvtLocalAddressesUpdated{Diffs: true}
 	addrsAdded := false
 
@@ -507,6 +508,9 @@ func (h *BasicHost) makeUpdatedAddrEvent(prev, current []ma.Multiaddr) *event.Ev
 		prevmap[string(addr.Bytes())] = addr
 	}
 	for _, addr := range current {
+		currmap[string(addr.Bytes())] = addr
+	}
+	for _, addr := range currmap {
 		_, ok := prevmap[string(addr.Bytes())]
 		updated := event.UpdatedAddress{Address: addr}
 		if ok {
@@ -831,7 +835,7 @@ func (h *BasicHost) Addrs() []ma.Multiaddr {
 	// Make a copy. Consumers can modify the slice elements
 	res := make([]ma.Multiaddr, len(addrs))
 	copy(res, addrs)
-	return res
+	return ma.Unique(res)
 }
 
 // NormalizeMultiaddr returns a multiaddr suitable for equality checks.

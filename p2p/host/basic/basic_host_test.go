@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p-testing/race"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -246,6 +247,63 @@ func TestAllAddrs(t *testing.T) {
 	require.Len(t, h.AllAddrs(), 3)
 	// Should still contain the original addr.
 	require.True(t, ma.Contains(h.AllAddrs(), firstAddr), "should still contain the original addr")
+}
+
+func TestAllAddrsUnique(t *testing.T) {
+	if race.WithRace() {
+		t.Skip("updates addrChangeTickrInterval which might be racy")
+	}
+	oldInterval := addrChangeTickrInterval
+	addrChangeTickrInterval = 100 * time.Millisecond
+	defer func() {
+		addrChangeTickrInterval = oldInterval
+	}()
+	sendNewAddrs := make(chan struct{})
+	opts := HostOpts{
+		AddrsFactory: func(addrs []ma.Multiaddr) []ma.Multiaddr {
+			select {
+			case <-sendNewAddrs:
+				return []ma.Multiaddr{
+					ma.StringCast("/ip4/1.2.3.4/tcp/1"),
+					ma.StringCast("/ip4/1.2.3.4/tcp/1"),
+					ma.StringCast("/ip4/1.2.3.4/tcp/1"),
+					ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1"),
+					ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1"),
+				}
+			default:
+				return nil
+			}
+		},
+	}
+	// no listen addrs
+	h, err := NewHost(swarmt.GenSwarm(t, swarmt.OptDialOnly), &opts)
+	require.NoError(t, err)
+	defer h.Close()
+	h.Start()
+
+	sub, err := h.EventBus().Subscribe(&event.EvtLocalAddressesUpdated{})
+	require.NoError(t, err)
+	out := make(chan int)
+	done := make(chan struct{})
+	go func() {
+		cnt := 0
+		for {
+			select {
+			case <-sub.Out():
+				cnt++
+			case <-done:
+				out <- cnt
+				return
+			}
+		}
+	}()
+	close(sendNewAddrs)
+	require.Len(t, h.Addrs(), 2)
+	require.ElementsMatch(t, []ma.Multiaddr{ma.StringCast("/ip4/1.2.3.4/tcp/1"), ma.StringCast("/ip4/1.2.3.4/udp/1/quic-v1")}, h.Addrs())
+	time.Sleep(2*addrChangeTickrInterval + 1*time.Second) // the background loop runs every 5 seconds. Wait for 2x that time.
+	close(done)
+	cnt := <-out
+	require.Equal(t, 1, cnt)
 }
 
 // getHostPair gets a new pair of hosts.
