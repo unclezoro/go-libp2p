@@ -202,18 +202,16 @@ func (r *Relay) handleReserve(s network.Stream) pbv2.Status {
 		return pbv2.Status_PERMISSION_DENIED
 	}
 	now := time.Now()
+	expire := now.Add(r.rc.ReservationTTL)
 
 	_, exists := r.rsvp[p]
-	if !exists {
-		if err := r.constraints.AddReservation(p, a); err != nil {
-			r.mx.Unlock()
-			log.Debugf("refusing relay reservation for %s; IP constraint violation: %s", p, err)
-			r.handleError(s, pbv2.Status_RESERVATION_REFUSED)
-			return pbv2.Status_RESERVATION_REFUSED
-		}
+	if err := r.constraints.Reserve(p, a, expire); err != nil {
+		r.mx.Unlock()
+		log.Debugf("refusing relay reservation for %s; IP constraint violation: %s", p, err)
+		r.handleError(s, pbv2.Status_RESERVATION_REFUSED)
+		return pbv2.Status_RESERVATION_REFUSED
 	}
 
-	expire := now.Add(r.rc.ReservationTTL)
 	r.rsvp[p] = expire
 	r.host.ConnManager().TagPeer(p, "relay-reservation", ReservationTagWeight)
 	r.mx.Unlock()
@@ -673,6 +671,7 @@ func (r *Relay) disconnected(n network.Network, c network.Conn) {
 	if ok {
 		delete(r.rsvp, p)
 	}
+	r.constraints.cleanupPeer(p)
 	r.mx.Unlock()
 
 	if ok && r.metricsTracer != nil {
