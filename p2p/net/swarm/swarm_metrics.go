@@ -82,7 +82,7 @@ var (
 			Namespace: metricNamespace,
 			Name:      "dial_latency_seconds",
 			Help:      "time taken to establish connection with the peer",
-			Buckets:   []float64{0.001, 1.3, 35},
+			Buckets:   []float64{0.001, 0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1, 2},
 		},
 		[]string{"outcome", "num_dials"},
 	)
