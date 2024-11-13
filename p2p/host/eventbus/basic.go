@@ -155,6 +155,7 @@ type sub struct {
 	dropper       func(reflect.Type)
 	metricsTracer MetricsTracer
 	name          string
+	closeOnce     sync.Once
 }
 
 func (s *sub) Name() string {
@@ -172,31 +173,32 @@ func (s *sub) Close() error {
 		for range s.ch {
 		}
 	}()
+	s.closeOnce.Do(func() {
+		for _, n := range s.nodes {
+			n.lk.Lock()
 
-	for _, n := range s.nodes {
-		n.lk.Lock()
+			for i := 0; i < len(n.sinks); i++ {
+				if n.sinks[i].ch == s.ch {
+					n.sinks[i], n.sinks[len(n.sinks)-1] = n.sinks[len(n.sinks)-1], nil
+					n.sinks = n.sinks[:len(n.sinks)-1]
 
-		for i := 0; i < len(n.sinks); i++ {
-			if n.sinks[i].ch == s.ch {
-				n.sinks[i], n.sinks[len(n.sinks)-1] = n.sinks[len(n.sinks)-1], nil
-				n.sinks = n.sinks[:len(n.sinks)-1]
-
-				if s.metricsTracer != nil {
-					s.metricsTracer.RemoveSubscriber(n.typ)
+					if s.metricsTracer != nil {
+						s.metricsTracer.RemoveSubscriber(n.typ)
+					}
+					break
 				}
-				break
+			}
+
+			tryDrop := len(n.sinks) == 0 && n.nEmitters.Load() == 0
+
+			n.lk.Unlock()
+
+			if tryDrop {
+				s.dropper(n.typ)
 			}
 		}
-
-		tryDrop := len(n.sinks) == 0 && n.nEmitters.Load() == 0
-
-		n.lk.Unlock()
-
-		if tryDrop {
-			s.dropper(n.typ)
-		}
-	}
-	close(s.ch)
+		close(s.ch)
+	})
 	return nil
 }
 

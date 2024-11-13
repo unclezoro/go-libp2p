@@ -562,6 +562,17 @@ func TestSubFailFully(t *testing.T) {
 	}
 }
 
+func TestSubCloseMultiple(t *testing.T) {
+	bus := NewBus()
+
+	sub, err := bus.Subscribe([]interface{}{new(EventB)})
+	require.NoError(t, err)
+	err = sub.Close()
+	require.NoError(t, err)
+	err = sub.Close()
+	require.NoError(t, err)
+}
+
 func testMany(t testing.TB, subs, emits, msgs int, stateful bool) {
 	if race.WithRace() && subs+emits > 5000 {
 		t.SkipNow()
