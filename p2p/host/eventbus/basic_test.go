@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/libp2p/go-libp2p-testing/race"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -129,6 +131,85 @@ func TestEmitNoSubNoBlock(t *testing.T) {
 	defer em.Close()
 
 	em.Emit(EventA{})
+}
+
+type mockLogger struct {
+	mu   sync.Mutex
+	logs []string
+}
+
+func (m *mockLogger) Errorf(format string, args ...interface{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logs = append(m.logs, fmt.Sprintf(format, args...))
+}
+
+func (m *mockLogger) Logs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.logs
+}
+
+func (m *mockLogger) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logs = nil
+}
+
+func TestEmitLogsErrorOnStall(t *testing.T) {
+	oldLogger := log
+	defer func() {
+		log = oldLogger
+	}()
+	ml := &mockLogger{}
+	log = ml
+
+	bus1 := NewBus()
+	bus2 := NewBus()
+
+	eventSub, err := bus1.Subscribe(new(EventA))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wildcardSub, err := bus2.Subscribe(event.WildcardSubscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testCases := []event.Subscription{eventSub, wildcardSub}
+	eventBuses := []event.Bus{bus1, bus2}
+
+	for i, sub := range testCases {
+		bus := eventBuses[i]
+		em, err := bus.Emitter(new(EventA))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer em.Close()
+
+		go func() {
+			for i := 0; i < subSettingsDefault.buffer+2; i++ {
+				em.Emit(EventA{})
+			}
+		}()
+
+		require.EventuallyWithT(t, func(collect *assert.CollectT) {
+			logs := ml.Logs()
+			found := false
+			for _, log := range logs {
+				if strings.Contains(log, "slow consumer") {
+					found = true
+					break
+				}
+			}
+			assert.True(collect, found, "expected to find slow consumer log")
+		}, 3*time.Second, 500*time.Millisecond)
+		ml.Clear()
+
+		// Close the subscriber so the worker can finish.
+		sub.Close()
+	}
 }
 
 func TestEmitOnClosed(t *testing.T) {
