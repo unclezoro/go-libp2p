@@ -394,10 +394,13 @@ func TestManyWildcardSubscriptions(t *testing.T) {
 	require.NoError(t, em1.Emit(EventA{}))
 	require.NoError(t, em2.Emit(EventB(1)))
 
-	// the first five still have 2 events, while the other five have 4 events.
-	for _, s := range subs[:5] {
-		require.Len(t, s.Out(), 2)
-	}
+	// the first five 0 events because it was closed. The other five
+	// have 4 events.
+	require.EventuallyWithT(t, func(t *assert.CollectT) {
+		for _, s := range subs[:5] {
+			require.Len(t, s.Out(), 0, "expected closed subscription to have flushed events")
+		}
+	}, 2*time.Second, 100*time.Millisecond)
 
 	for _, s := range subs[5:] {
 		require.Len(t, s.Out(), 4)
@@ -406,6 +409,10 @@ func TestManyWildcardSubscriptions(t *testing.T) {
 	// close them all, the first five will be closed twice (asserts idempotency).
 	for _, s := range subs {
 		require.NoError(t, s.Close())
+	}
+
+	for _, s := range subs {
+		require.Zero(t, s.(*wildcardSub).w.nSinks.Load())
 	}
 }
 

@@ -126,6 +126,7 @@ type wildcardSub struct {
 	w             *wildcardNode
 	metricsTracer MetricsTracer
 	name          string
+	closeOnce     sync.Once
 }
 
 func (w *wildcardSub) Out() <-chan interface{} {
@@ -133,10 +134,13 @@ func (w *wildcardSub) Out() <-chan interface{} {
 }
 
 func (w *wildcardSub) Close() error {
-	w.w.removeSink(w.ch)
-	if w.metricsTracer != nil {
-		w.metricsTracer.RemoveSubscriber(reflect.TypeOf(event.WildcardSubscription))
-	}
+	w.closeOnce.Do(func() {
+		w.w.removeSink(w.ch)
+		if w.metricsTracer != nil {
+			w.metricsTracer.RemoveSubscriber(reflect.TypeOf(event.WildcardSubscription))
+		}
+	})
+
 	return nil
 }
 
