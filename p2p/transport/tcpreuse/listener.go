@@ -231,8 +231,6 @@ func (m *multiplexedListener) run() error {
 			t, c, err := identifyConnType(c)
 			if err != nil {
 				connScope.Done()
-				closeErr := c.Close()
-				err = errors.Join(err, closeErr)
 				log.Debugf("error demultiplexing connection: %s", err.Error())
 				return
 			}

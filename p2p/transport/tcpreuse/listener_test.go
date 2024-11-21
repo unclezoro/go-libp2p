@@ -447,3 +447,30 @@ func TestListenerClose(t *testing.T) {
 		testClose(listenAddr)
 	}
 }
+
+func setDeferReset[T any](t testing.TB, ptr *T, val T) {
+	t.Helper()
+	orig := *ptr
+	*ptr = val
+	t.Cleanup(func() { *ptr = orig })
+}
+
+// TestHitTimeout asserts that we don't panic in case we fail to peek at the connection.
+func TestHitTimeout(t *testing.T) {
+	setDeferReset(t, &identifyConnTimeout, 100*time.Millisecond)
+	// listen on port 0
+	cm := NewConnMgr(false, nil, nil)
+
+	listenAddr := ma.StringCast("/ip4/127.0.0.1/tcp/0")
+	ml, err := cm.DemultiplexedListen(listenAddr, DemultiplexedConnType_MultistreamSelect)
+	require.NoError(t, err)
+	defer ml.Close()
+
+	tcpConn, err := net.Dial(ml.Addr().Network(), ml.Addr().String())
+	require.NoError(t, err)
+
+	// Stall tcp conn for over the timeout.
+	time.Sleep(identifyConnTimeout + 100*time.Millisecond)
+
+	tcpConn.Close()
+}
