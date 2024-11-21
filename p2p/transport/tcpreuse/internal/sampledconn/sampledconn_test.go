@@ -58,7 +58,7 @@ func TestSampledConn(t *testing.T) {
 				assert.Equal(t, "hel", string(peeked[:]))
 
 				buf := make([]byte, 5)
-				_, err = clientConn.Read(buf)
+				_, err = io.ReadFull(clientConn, buf)
 				assert.NoError(t, err)
 				assert.Equal(t, "hello", string(buf))
 			} else {
